@@ -41,7 +41,8 @@ func New(target *url.URL, publicBaseURL *url.URL, timeout time.Duration, log *sl
 	}
 	reverseProxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		log.Error("upstream request failed", "upstream", target.Host, "method", r.Method, "path", r.URL.Path)
-		if errors.Is(err, context.DeadlineExceeded) {
+		var netErr net.Error
+		if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) && netErr.Timeout() {
 			protocol.WriteError(w, http.StatusGatewayTimeout, "TimeoutException", "Upstream request timed out.")
 			return
 		}

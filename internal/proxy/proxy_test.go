@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -82,6 +83,31 @@ func TestProxyFailureLogsExcludeRequestSecrets(t *testing.T) {
 		if strings.Contains(logs.String(), secret) {
 			t.Fatalf("proxy log leaked request secret %q: %s", secret, logs.String())
 		}
+	}
+}
+
+func TestProxyMapsTLSHandshakeTimeoutToGatewayTimeout(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = io.Copy(io.Discard, connection)
+	}()
+	target, _ := url.Parse("https://" + listener.Addr().String())
+	publicURL, _ := url.Parse("https://auth.example.com")
+	handler := New(target, publicURL, 7*time.Second, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://scribe.example.com/", nil))
+	if response.Code != http.StatusGatewayTimeout || !strings.Contains(response.Body.String(), "TimeoutException") {
+		t.Fatalf("TLS timeout response = %d %s", response.Code, response.Body.String())
 	}
 }
 
