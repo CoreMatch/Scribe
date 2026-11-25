@@ -206,7 +206,7 @@ func validateTextures(textures Textures) error {
 	if textures.Timestamp <= 0 {
 		return errors.New("textures timestamp must be positive")
 	}
-	if !validProfileID(textures.ProfileID) {
+	if !ValidProfileID(textures.ProfileID) {
 		return errors.New("textures profile ID must be an unhyphenated UUID")
 	}
 	if !validProfileName(textures.ProfileName) {
@@ -225,7 +225,7 @@ func validateTextures(textures Textures) error {
 }
 
 func validateProfile(profile SignedProfile) error {
-	if !validProfileID(profile.ID) {
+	if !ValidProfileID(profile.ID) {
 		return errors.New("profile ID must be an unhyphenated UUID")
 	}
 	if !validProfileName(profile.Name) {
@@ -234,7 +234,7 @@ func validateProfile(profile SignedProfile) error {
 	return nil
 }
 
-func validProfileID(id string) bool {
+func ValidProfileID(id string) bool {
 	if len(id) != 32 || !utf8.ValidString(id) {
 		return false
 	}
