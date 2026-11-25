@@ -31,6 +31,10 @@ type Result struct {
 	Commit      CommitResult
 }
 
+type Runner interface {
+	Migrate(context.Context, Input) (Result, error)
+}
+
 type SnapshotCapturer interface {
 	Capture(context.Context, protocol.Profile) (Snapshot, error)
 }

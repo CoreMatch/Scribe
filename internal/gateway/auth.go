@@ -2,11 +2,13 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 
 	"github.com/corematch/scribe/internal/binding"
+	"github.com/corematch/scribe/internal/migration"
 	"github.com/corematch/scribe/internal/protocol"
 	"github.com/corematch/scribe/internal/race"
 )
@@ -50,8 +52,7 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 	case race.NewWins:
 		g.completeAuthentication(w, r, decision.Target, identifier, binding.Armorial, "", true)
 	case race.MigrateReuseCore, race.MigrateCreateCore:
-		g.log.Info("migration required", "outcome", decision.Outcome)
-		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
+		g.migrate(w, r, request, identifier, decision)
 	case race.BlockRetry:
 		g.log.Info("authentication blocked", "reason", decision.Reason)
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication service temporarily unavailable.")
@@ -60,6 +61,83 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication service temporarily unavailable.")
 	}
+}
+
+func (g *Gateway) migrate(w http.ResponseWriter, r *http.Request, request protocol.AuthenticateRequest, identifier string, decision race.Decision) {
+	if g.migrator == nil {
+		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "migration_unavailable")
+		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
+		return
+	}
+	legacy, err := protocol.DecodeAuthenticateResponse(decision.Legacy.Body)
+	if err != nil || legacy.SelectedProfile == nil {
+		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "invalid_legacy_session")
+		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
+		return
+	}
+	legacyUserID, legacyProperties := migrationUser(legacy.User)
+	migrated, err := g.migrator.Migrate(r.Context(), migration.Input{
+		Identifier:           identifier,
+		Password:             request.Password,
+		SelectedProfile:      *legacy.SelectedProfile,
+		LegacyUserID:         legacyUserID,
+		LegacyUserProperties: legacyProperties,
+	})
+	if err != nil {
+		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "migration_failed")
+		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
+		return
+	}
+	result, err := migratedAuthenticationResult(migrated)
+	if err != nil {
+		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "invalid_migration_result")
+		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
+		return
+	}
+	g.completeAuthentication(w, r, result, identifier, binding.Armorial, migrated.MigrationID, true)
+}
+
+func migrationUser(user *protocol.User) (string, map[string]string) {
+	if user == nil {
+		return "", nil
+	}
+	var properties map[string]string
+	for _, property := range user.Properties {
+		name, ok := property["name"]
+		if !ok || name == "" {
+			continue
+		}
+		if properties == nil {
+			properties = make(map[string]string)
+		}
+		properties[name] = property["value"]
+	}
+	return user.ID, properties
+}
+
+func migratedAuthenticationResult(migrated migration.Result) (race.Result, error) {
+	if migrated.MigrationID == "" || migrated.Commit.MigrationID != migrated.MigrationID || migrated.Commit.Status != "committed" {
+		return race.Result{}, errors.New("migration result is not committed")
+	}
+	session := migrated.Commit.Session
+	response := protocol.AuthenticateResponse{
+		AccessToken:       session.AccessToken,
+		ClientToken:       session.ClientToken,
+		SelectedProfile:   &session.SelectedProfile,
+		AvailableProfiles: session.AvailableProfiles,
+	}
+	body, err := json.Marshal(response)
+	if err != nil {
+		return race.Result{}, err
+	}
+	if _, err := protocol.DecodeAuthenticateResponse(body); err != nil {
+		return race.Result{}, err
+	}
+	return race.Result{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       body,
+	}, nil
 }
 
 func (g *Gateway) completeAuthentication(w http.ResponseWriter, r *http.Request, result race.Result, identifier string, winner binding.Winner, migrationID string, createBinding bool) {

@@ -16,6 +16,8 @@ import (
 
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/circuitbreaker"
+	"github.com/corematch/scribe/internal/migration"
+	"github.com/corematch/scribe/internal/protocol"
 	"github.com/corematch/scribe/internal/race"
 )
 
@@ -23,6 +25,38 @@ type testGateway struct {
 	gateway *Gateway
 	store   *binding.SQLiteStore
 	handler http.Handler
+}
+
+type fakeMigrator struct {
+	result migration.Result
+	err    error
+	calls  []migration.Input
+}
+
+func (f *fakeMigrator) Migrate(_ context.Context, input migration.Input) (migration.Result, error) {
+	f.calls = append(f.calls, input)
+	return f.result, f.err
+}
+
+type migratorFunc func(context.Context, migration.Input) (migration.Result, error)
+
+func (f migratorFunc) Migrate(ctx context.Context, input migration.Input) (migration.Result, error) {
+	return f(ctx, input)
+}
+
+func successfulMigration() migration.Result {
+	return migration.Result{
+		MigrationID: "00000000-0000-4000-8000-000000000001",
+		Commit: migration.CommitResult{
+			MigrationID: "00000000-0000-4000-8000-000000000001",
+			Status:      "committed",
+			Session: migration.Session{
+				AccessToken:     "migrated-token",
+				ClientToken:     "migrated-client",
+				SelectedProfile: protocol.Profile{ID: "12345678123412341234567812345678", Name: "LegacyPlayer"},
+			},
+		},
+	}
 }
 
 func TestAuthenticateBindsNewWinnerAndNeverReraces(t *testing.T) {
@@ -79,12 +113,13 @@ func TestBoundUserDoesNotSwitchWhenWinnerFails(t *testing.T) {
 	if response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`); response.Code != http.StatusOK {
 		t.Fatalf("initial authenticate = %d %s", response.Code, response.Body.String())
 	}
+	legacyCallsBeforeFailure := legacyCalls.Load()
 	fail.Store(true)
 	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
 	if response.Code != http.StatusBadGateway {
 		t.Fatalf("failed winner status = %d, want 502", response.Code)
 	}
-	if legacyCalls.Load() != 1 {
+	if legacyCalls.Load() != legacyCallsBeforeFailure {
 		t.Fatalf("legacy was called after binding: %d", legacyCalls.Load())
 	}
 	bound, err := env.store.GetBinding(context.Background(), "Player")
@@ -129,6 +164,118 @@ func TestMigrationBranchesFailClosedWithoutBinding(t *testing.T) {
 				t.Fatalf("migration created a binding: %v", err)
 			}
 		})
+	}
+}
+
+func TestAuthenticateMigratesLegacyUserBeforeBinding(t *testing.T) {
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, `{"accessToken":"legacy-token","clientToken":"legacy-client","selectedProfile":{"id":"12345678123412341234567812345678","name":"LegacyPlayer"},"user":{"id":"legacy-user","properties":[{"name":"legacy-role","value":"member"}]}}`)
+	}))
+	defer legacy.Close()
+	armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusForbidden, `{"error":"ForbiddenOperationException"}`)
+	}))
+	defer armorial.Close()
+	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+	migrator := &fakeMigrator{result: successfulMigration()}
+	env.gateway.migrator = migrator
+
+	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player@Example.COM","password":"secret"}`)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "migrated-token") {
+		t.Fatalf("migration response = %d %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "legacy-token") || strings.Contains(response.Body.String(), "armorial-token") {
+		t.Fatalf("migration leaked an upstream token: %s", response.Body.String())
+	}
+	if len(migrator.calls) != 1 {
+		t.Fatalf("migration calls = %d, want 1", len(migrator.calls))
+	}
+	input := migrator.calls[0]
+	if input.Identifier != "Player@example.com" || input.Password != "secret" || input.SelectedProfile.Name != "LegacyPlayer" {
+		t.Fatalf("unexpected migration input: %#v", input)
+	}
+	if input.LegacyUserID != "legacy-user" || input.LegacyUserProperties["legacy-role"] != "member" {
+		t.Fatalf("legacy user metadata was not passed: %#v", input)
+	}
+	bound, err := env.store.GetBinding(context.Background(), "Player@example.com")
+	if err != nil || bound.Winner != binding.Armorial || bound.MigrationID != migrator.result.MigrationID {
+		t.Fatalf("binding = %+v, %v", bound, err)
+	}
+	if _, err := env.store.GetBindingByToken(context.Background(), "migrated-token"); err != nil {
+		t.Fatalf("migrated token binding missing: %v", err)
+	}
+}
+
+func TestMigrationFailuresDoNotBindOrLeakTokens(t *testing.T) {
+	tests := []struct {
+		name   string
+		result migration.Result
+		err    error
+	}{
+		{name: "migration error", err: errors.New("commit failed")},
+		{name: "uncommitted result", result: migration.Result{MigrationID: "migration", Commit: migration.CommitResult{MigrationID: "migration", Status: "applying"}}},
+		{name: "incomplete session", result: migration.Result{MigrationID: "migration", Commit: migration.CommitResult{MigrationID: "migration", Status: "committed"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, authenticationBody("legacy-token", "LegacyPlayer", true))
+			}))
+			defer legacy.Close()
+			armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusForbidden, `{"error":"ForbiddenOperationException"}`)
+			}))
+			defer armorial.Close()
+			env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+			env.gateway.migrator = &fakeMigrator{result: tt.result, err: tt.err}
+			response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status = %d, want 503", response.Code)
+			}
+			if strings.Contains(response.Body.String(), "token") {
+				t.Fatalf("migration failure leaked a token: %s", response.Body.String())
+			}
+			if _, err := env.store.GetBinding(context.Background(), "Player"); !errors.Is(err, binding.ErrNotFound) {
+				t.Fatalf("failed migration created a binding: %v", err)
+			}
+		})
+	}
+}
+
+func TestCommittedMigrationCannotReplaceExistingBinding(t *testing.T) {
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, authenticationBody("legacy-token", "LegacyPlayer", true))
+	}))
+	defer legacy.Close()
+	armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusForbidden, `{"error":"ForbiddenOperationException"}`)
+	}))
+	defer armorial.Close()
+	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+	env.gateway.migrator = migratorFunc(func(context.Context, migration.Input) (migration.Result, error) {
+		if _, err := env.store.BindIfAbsent(context.Background(), "Player", binding.Legacy, "existing-migration"); err != nil {
+			return migration.Result{}, err
+		}
+		return successfulMigration(), nil
+	})
+	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
+	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "migrated-token") {
+		t.Fatalf("conflicting migration response = %d %s", response.Code, response.Body.String())
+	}
+	bound, err := env.store.GetBinding(context.Background(), "Player")
+	if err != nil || bound.Winner != binding.Legacy || bound.MigrationID != "existing-migration" {
+		t.Fatalf("binding changed after conflict: %+v, %v", bound, err)
+	}
+}
+
+func TestMigrationUserMetadata(t *testing.T) {
+	id, properties := migrationUser(&protocol.User{ID: "user", Properties: []map[string]string{
+		{"value": "ignored"},
+		{"name": "role", "value": "member"},
+		{"name": "empty"},
+	}})
+	if id != "user" || len(properties) != 2 || properties["role"] != "member" || properties["empty"] != "" {
+		t.Fatalf("unexpected metadata: %q %#v", id, properties)
 	}
 }
 

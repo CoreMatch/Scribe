@@ -13,6 +13,7 @@ import (
 
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/circuitbreaker"
+	"github.com/corematch/scribe/internal/migration"
 	"github.com/corematch/scribe/internal/proxy"
 	"github.com/corematch/scribe/internal/race"
 )
@@ -26,6 +27,7 @@ type Options struct {
 	MaxResponseBody int64
 	Circuit         circuitbreaker.Settings
 	MigrationIntent race.Intent
+	Migrator        migration.Runner
 }
 
 type Gateway struct {
@@ -41,6 +43,7 @@ type Gateway struct {
 	maxRequestBody  int64
 	maxResponseBody int64
 	migrationIntent race.Intent
+	migrator        migration.Runner
 	log             *slog.Logger
 }
 
@@ -115,6 +118,7 @@ func New(options Options, store binding.Store, log *slog.Logger) (*Gateway, erro
 		maxRequestBody:  maxRequestBody,
 		maxResponseBody: maxResponseBody,
 		migrationIntent: options.MigrationIntent,
+		migrator:        options.Migrator,
 		log:             log,
 	}, nil
 }
