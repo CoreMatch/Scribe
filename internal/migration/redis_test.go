@@ -687,6 +687,67 @@ func TestRedisListReturnsPackagesWithoutIdentifierIndexes(t *testing.T) {
 	}
 }
 
+func TestRedisListRepairsMissingIdentifierIndex(t *testing.T) {
+	for _, state := range []State{StateStagedInRedis, StateApplying} {
+		t.Run(string(state), func(t *testing.T) {
+			server := miniredis.RunT(t)
+			store, client := testRedisStore(t, server, RedisOptions{TTL: time.Hour})
+			identifierHash := strings.Repeat("ab", 32)
+			record, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state == StateApplying {
+				record, err = store.Transition(context.Background(), record.MigrationID, record.Version, StateApplying)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			server.FastForward(15 * time.Minute)
+			if err := client.Del(context.Background(), identifierIndexKey(identifierHash)).Err(); err != nil {
+				t.Fatal(err)
+			}
+			records, err := store.List(context.Background())
+			if err != nil || len(records) != 1 || records[0].MigrationID != testMigrationID {
+				t.Fatalf("List() = %+v, %v", records, err)
+			}
+			indexed, err := client.Get(context.Background(), identifierIndexKey(identifierHash)).Result()
+			if err != nil || indexed != testMigrationID {
+				t.Fatalf("repaired index = %q, %v", indexed, err)
+			}
+			wantTTL := 45 * time.Minute
+			if state == StateApplying {
+				wantTTL = 0
+			}
+			if ttl := server.TTL(identifierIndexKey(identifierHash)); ttl != wantTTL {
+				t.Fatalf("repaired index TTL = %v, want %v", ttl, wantTTL)
+			}
+		})
+	}
+}
+
+func TestRedisListRejectsDuplicateIdentifierPackages(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	identifierHash := strings.Repeat("ab", 32)
+	secondID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Del(context.Background(), identifierIndexKey(identifierHash)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Stage(context.Background(), secondID, identifierHash, validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.List(context.Background()); !errors.Is(err, ErrCorruptStaging) {
+		t.Fatalf("List() error = %v", err)
+	}
+	if exists, err := client.Exists(context.Background(), stagingKey(testMigrationID), stagingKey(secondID)).Result(); err != nil || exists != 2 {
+		t.Fatalf("duplicate packages were not preserved: exists=%d, err=%v", exists, err)
+	}
+}
+
 func TestRedisListFailsClosedForUnexpectedKeys(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, client := testRedisStore(t, server, RedisOptions{})

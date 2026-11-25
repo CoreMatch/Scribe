@@ -346,6 +346,32 @@ end
 return 1
 `
 
+const repairIdentifierIndexScript = `
+local payload = redis.call('HGET', KEYS[1], 'payload')
+if not payload then
+  return -1
+end
+local payload_valid, decoded = pcall(cjson.decode, payload)
+if not payload_valid or type(decoded) ~= 'table' or type(decoded.identifier_hash) ~= 'string' or
+  decoded.identifier_hash ~= ARGV[2] or decoded.migration_id ~= ARGV[1] then
+  return -3
+end
+local indexed = redis.call('GET', KEYS[2])
+if indexed then
+  if indexed ~= ARGV[1] then
+    return -3
+  end
+  return 0
+end
+local ttl = redis.call('PTTL', KEYS[1])
+if ttl > 0 then
+  redis.call('SET', KEYS[2], ARGV[1], 'PX', ttl)
+else
+  redis.call('SET', KEYS[2], ARGV[1])
+end
+return 1
+`
+
 func (s *RedisStore) List(ctx context.Context) ([]StagedMigration, error) {
 	var cursor uint64
 	seen := make(map[string]struct{})
@@ -373,6 +399,19 @@ func (s *RedisStore) List(ctx context.Context) ([]StagedMigration, error) {
 			}
 			if err != nil {
 				return nil, err
+			}
+			result, err := s.client.Eval(ctx, repairIdentifierIndexScript, []string{key, identifierIndexKey(record.IdentifierHash)}, record.MigrationID, record.IdentifierHash).Int64()
+			if err != nil {
+				return nil, err
+			}
+			switch result {
+			case -1:
+				continue
+			case -3:
+				return nil, ErrCorruptStaging
+			case 0, 1:
+			default:
+				return nil, ErrCorruptStaging
 			}
 			records = append(records, record)
 		}
