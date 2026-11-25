@@ -89,6 +89,16 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	commitRequest := CommitRequest{
+		Staged:               staged,
+		Identifier:           identifier,
+		Password:             input.Password,
+		LegacyUserID:         input.LegacyUserID,
+		LegacyUserProperties: input.LegacyUserProperties,
+	}
+	if _, err := buildCommitMetadata(commitRequest); err != nil {
+		return Result{}, err
+	}
 	switch staged.State {
 	case StateStagedInRedis, StateReconciling:
 		staged, err = s.staging.Transition(ctx, staged.MigrationID, staged.Version, StateApplying)
@@ -101,14 +111,9 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 	default:
 		return Result{}, ErrMigrationBlocked
 	}
+	commitRequest.Staged = staged
 	s.log.Info("migration applying", "migration_id", staged.MigrationID)
-	commit, err := s.committer.Commit(ctx, CommitRequest{
-		Staged:               staged,
-		Identifier:           identifier,
-		Password:             input.Password,
-		LegacyUserID:         input.LegacyUserID,
-		LegacyUserProperties: input.LegacyUserProperties,
-	})
+	commit, err := s.committer.Commit(ctx, commitRequest)
 	bookkeepingCtx := context.WithoutCancel(ctx)
 	if err != nil {
 		_, _ = s.staging.Transition(bookkeepingCtx, staged.MigrationID, staged.Version, StateReconciling)

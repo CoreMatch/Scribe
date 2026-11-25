@@ -25,6 +25,9 @@ type fakeSnapshotCapturer struct {
 
 func (f *fakeSnapshotCapturer) Capture(_ context.Context, profile protocol.Profile) (Snapshot, error) {
 	f.calls = append(f.calls, captureCall{profile: profile})
+	if f.snapshot.Profile.ID == "" {
+		return validServiceSnapshot("Player"), f.err
+	}
 	return f.snapshot, f.err
 }
 
@@ -51,6 +54,13 @@ func (f *fakeStagingStore) Stage(_ context.Context, id, identifierHash string, s
 	if f.staged.MigrationID == "" {
 		return StagedMigration{}, false, errors.New("missing staged migration")
 	}
+	commitDigest, err := CommitDigest(snapshot, identifierHash)
+	if err != nil {
+		return StagedMigration{}, false, err
+	}
+	f.staged.CommitDigest = commitDigest
+	f.staged.IdentifierHash = identifierHash
+	f.staged.Profile = protocol.Profile{ID: snapshot.Profile.ID, Name: snapshot.Profile.Name}
 	return f.staged, false, nil
 }
 
@@ -87,9 +97,17 @@ func (f *fakeCommitter) Commit(_ context.Context, request CommitRequest) (Commit
 	return f.result, f.err
 }
 
+func validServiceSnapshot(name string) Snapshot {
+	id := strings.Repeat("a", 32)
+	return Snapshot{
+		Profile:  protocol.SignedProfile{ID: id, Name: name},
+		Textures: protocol.Textures{ProfileID: id, ProfileName: name},
+	}
+}
+
 func TestServiceMigratesSelectedProfileAndCommitsBeforeReturning(t *testing.T) {
 	profile := protocol.Profile{ID: strings.Repeat("a", 32), Name: "Player"}
-	capturer := &fakeSnapshotCapturer{snapshot: Snapshot{Profile: protocol.SignedProfile{ID: profile.ID, Name: profile.Name}}}
+	capturer := &fakeSnapshotCapturer{snapshot: validServiceSnapshot(profile.Name)}
 	staging := &fakeStagingStore{staged: StagedMigration{
 		MigrationID:    "00000000-0000-4000-8000-000000000001",
 		IdentifierHash: strings.Repeat("b", 64),
@@ -226,6 +244,44 @@ func TestServiceMovesFailedCommitToReconciling(t *testing.T) {
 		if staging.transitions[i] != want[i] {
 			t.Fatalf("unexpected transitions: %#v", staging.transitions)
 		}
+	}
+}
+
+func TestServiceRejectsLocalCommitValidationBeforeApplying(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		password string
+	}{
+		{name: "Player", password: "short"},
+		{name: "x", password: "secret"},
+	} {
+		t.Run(test.name+"/"+test.password, func(t *testing.T) {
+			snapshot := validServiceSnapshot(test.name)
+			staging := &fakeStagingStore{staged: StagedMigration{
+				MigrationID: "00000000-0000-4000-8000-000000000001",
+				State:       StateStagedInRedis,
+				Version:     1,
+			}}
+			committer, err := NewClient("https://127.0.0.1:1", "service-token", ClientOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			service, err := NewService(&fakeSnapshotCapturer{snapshot: snapshot}, staging, committer, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = service.Migrate(context.Background(), Input{
+				Identifier:      "Player",
+				Password:        test.password,
+				SelectedProfile: protocol.Profile{ID: snapshot.Profile.ID, Name: snapshot.Profile.Name},
+			})
+			if !errors.Is(err, ErrInvalidCommit) {
+				t.Fatalf("Migrate() error = %v, want ErrInvalidCommit", err)
+			}
+			if len(staging.transitions) != 0 || staging.staged.State != StateStagedInRedis {
+				t.Fatalf("local validation changed migration state: transitions=%#v state=%s", staging.transitions, staging.staged.State)
+			}
+		})
 	}
 }
 
