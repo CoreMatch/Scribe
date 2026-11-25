@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -126,8 +127,8 @@ local transitions = {
   APPLYING = {COMMITTED=true, RECONCILING=true, ROLLING_BACK=true},
   COMMITTED = {LOCKED=true},
   LOCKED = {},
-  RECONCILING = {APPLYING=true, COMMITTED=true, ROLLING_BACK=true, DISCARDED=true, UNKNOWN=true},
-  ROLLING_BACK = {ROLLED_BACK=true, RECONCILING=true, UNKNOWN=true},
+  RECONCILING = {APPLYING=true, COMMITTED=true, ROLLING_BACK=true, ROLLED_BACK=true, DISCARDED=true, UNKNOWN=true},
+  ROLLING_BACK = {COMMITTED=true, ROLLED_BACK=true, RECONCILING=true, UNKNOWN=true},
   ROLLED_BACK = {DISCARDED=true},
   DISCARDED = {},
   UNKNOWN = {RECONCILING=true, ROLLING_BACK=true, DISCARDED=true}
@@ -278,6 +279,45 @@ func (s *RedisStore) Stage(ctx context.Context, migrationID, identifierHash stri
 		}, true, nil
 	}
 	return StagedMigration{}, false, ErrCorruptStaging
+}
+
+func (s *RedisStore) List(ctx context.Context) ([]StagedMigration, error) {
+	var cursor uint64
+	seen := make(map[string]struct{})
+	var records []StagedMigration
+	for {
+		keys, next, err := s.client.Scan(ctx, cursor, "scribe:migration:*", 100).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range keys {
+			if strings.HasPrefix(key, "scribe:migration:identifier:") {
+				continue
+			}
+			migrationID := strings.TrimPrefix(key, "scribe:migration:")
+			if !validMigrationID(migrationID) {
+				return nil, ErrCorruptStaging
+			}
+			if _, ok := seen[migrationID]; ok {
+				continue
+			}
+			seen[migrationID] = struct{}{}
+			record, err := s.Load(ctx, migrationID)
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			records = append(records, record)
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	sort.Slice(records, func(i, j int) bool { return records[i].MigrationID < records[j].MigrationID })
+	return records, nil
 }
 
 func (s *RedisStore) Load(ctx context.Context, migrationID string) (StagedMigration, error) {

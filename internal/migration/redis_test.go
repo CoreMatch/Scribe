@@ -415,6 +415,62 @@ func TestRedisPendingFailsClosedForCorruptIndex(t *testing.T) {
 	}
 }
 
+func TestRedisListReturnsPackagesWithoutIdentifierIndexes(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	secondID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	if _, _, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Stage(context.Background(), secondID, strings.Repeat("cd", 32), validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	records, err := store.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[0].MigrationID != testMigrationID || records[1].MigrationID != secondID {
+		t.Fatalf("List() = %+v", records)
+	}
+	server.FastForward(25 * time.Hour)
+	records, err = store.List(context.Background())
+	if err != nil || len(records) != 0 {
+		t.Fatalf("List() after expiry = %+v, %v", records, err)
+	}
+}
+
+func TestRedisListFailsClosedForUnexpectedKeys(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	if err := client.Set(context.Background(), "scribe:migration:invalid", "corrupt", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.List(context.Background()); !errors.Is(err, ErrCorruptStaging) {
+		t.Fatalf("List() error = %v", err)
+	}
+}
+
+func TestRedisReconcileCanObserveAuthoritativeTerminalStates(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	snapshot := validDigestSnapshot(t)
+	identifierHash := strings.Repeat("ab", 32)
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateReconciling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, record.Version, StateRolledBack); err != nil {
+		t.Fatalf("reconciled rollback transition failed: %v", err)
+	}
+}
+
 func testRedisStore(t *testing.T, server *miniredis.Miniredis, options RedisOptions) (*RedisStore, *redis.Client) {
 	t.Helper()
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
