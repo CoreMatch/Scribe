@@ -92,10 +92,13 @@ const stageScript = `
 local ttl = ARGV[7]
 local indexed = redis.call('GET', KEYS[2])
 if indexed then
-  redis.call('PEXPIRE', KEYS[1], ttl)
-  redis.call('PEXPIRE', KEYS[2], ttl)
+  local existing_key = 'scribe:migration:' .. indexed
+  local payload = redis.call('HGET', existing_key, 'payload')
+  if payload then
+    redis.call('PEXPIRE', existing_key, ttl)
+    redis.call('PEXPIRE', KEYS[2], ttl)
+  end
   if indexed == ARGV[8] then
-    local payload = redis.call('HGET', KEYS[1], 'payload')
     if payload then
       return payload
     end

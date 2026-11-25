@@ -102,6 +102,50 @@ func TestRedisStageIsIdempotentAndRejectsDigestConflicts(t *testing.T) {
 	}
 }
 
+func TestRedisIdentifierRetryRefreshesExistingPackageTTL(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	identifierHash := strings.Repeat("ab", 32)
+	secondID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	first, created, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t))
+	if err != nil || !created {
+		t.Fatalf("Stage() = %+v, %v, %v", first, created, err)
+	}
+	server.FastForward(23 * time.Hour)
+	retried, created, err := store.Stage(context.Background(), secondID, identifierHash, validDigestSnapshot(t))
+	if err != nil || created || !reflect.DeepEqual(retried, first) {
+		t.Fatalf("retry Stage() = %+v, %v, %v", retried, created, err)
+	}
+	for _, key := range []string{stagingKey(testMigrationID), identifierIndexKey(identifierHash)} {
+		if ttl := server.TTL(key); ttl != 24*time.Hour {
+			t.Fatalf("TTL(%q) = %v, want 24h", key, ttl)
+		}
+	}
+	if exists, err := client.Exists(context.Background(), stagingKey(secondID)).Result(); err != nil || exists != 0 {
+		t.Fatalf("retry created proposed package: exists=%d, err=%v", exists, err)
+	}
+}
+
+func TestRedisIdentifierRetryDoesNotRefreshMissingPackageIndex(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	identifierHash := strings.Repeat("ab", 32)
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Del(context.Background(), stagingKey(testMigrationID)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	server.FastForward(23 * time.Hour)
+	secondID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	if _, _, err := store.Stage(context.Background(), secondID, identifierHash, validDigestSnapshot(t)); err == nil {
+		t.Fatal("Stage() reused an index with a missing package")
+	}
+	if ttl := server.TTL(identifierIndexKey(identifierHash)); ttl != time.Hour {
+		t.Fatalf("stale index TTL = %v, want 1h", ttl)
+	}
+}
+
 func TestRedisStageWithoutAssets(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := testRedisStore(t, server, RedisOptions{})
