@@ -16,14 +16,14 @@ type Server struct {
 	shutdownTimeout time.Duration
 }
 
-func New(addr string, handler http.Handler, shutdownTimeout time.Duration, log *slog.Logger) *Server {
+func New(addr string, handler http.Handler, shutdownTimeout, writeTimeout time.Duration, log *slog.Logger) *Server {
 	return &Server{
 		http: &http.Server{
 			Addr:              addr,
 			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       15 * time.Second,
-			WriteTimeout:      30 * time.Second,
+			WriteTimeout:      writeTimeout,
 			IdleTimeout:       60 * time.Second,
 			MaxHeaderBytes:    1 << 20,
 		},

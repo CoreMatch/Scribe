@@ -2,13 +2,19 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"log/slog"
 	"os"
 
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/config"
 	"github.com/corematch/scribe/internal/gateway"
+	"github.com/corematch/scribe/internal/migration"
+	"github.com/corematch/scribe/internal/profile"
 	"github.com/corematch/scribe/internal/server"
+	"github.com/corematch/scribe/internal/texture"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -24,6 +30,21 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	redisClient, err := openRedis(cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			log.Error("migration Redis close failed")
+		}
+	}()
+	pingCtx, cancelPing := context.WithTimeout(ctx, cfg.RequestTimeout)
+	err = redisClient.Ping(pingCtx).Err()
+	cancelPing()
+	if err != nil {
+		return errors.New("migration Redis is unavailable")
+	}
 	store, err := binding.OpenSQLite(cfg.SQLitePath)
 	if err != nil {
 		return err
@@ -34,6 +55,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 		}
 	}()
 
+	migrator, err := newMigrator(cfg, redisClient, log)
+	if err != nil {
+		return err
+	}
 	gateway, err := gateway.New(gateway.Options{
 		PublicBaseURL:   cfg.PublicBaseURL,
 		LegacyBaseURL:   cfg.LegacyBaseURL,
@@ -41,9 +66,58 @@ func run(ctx context.Context, log *slog.Logger) error {
 		RequestTimeout:  cfg.RequestTimeout,
 		MaxRequestBody:  cfg.MaxRequestBody,
 		Circuit:         circuitbreakerSettings(cfg),
+		Migrator:        migrator,
 	}, store, log)
 	if err != nil {
 		return err
 	}
-	return server.New(cfg.ListenAddr, httpMux(cfg, gateway), cfg.ShutdownTimeout, log).Run(ctx)
+	ready := func() error {
+		checkCtx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+		defer cancel()
+		if err := redisClient.Ping(checkCtx).Err(); err != nil {
+			return errors.New("migration Redis is unavailable")
+		}
+		return nil
+	}
+	return server.New(cfg.ListenAddr, httpMux(cfg, gateway, ready), cfg.ShutdownTimeout, cfg.WriteTimeout, log).Run(ctx)
+}
+
+func openRedis(rawURL string) (*redis.Client, error) {
+	options, err := redis.ParseURL(rawURL)
+	if err != nil || options.TLSConfig == nil || options.TLSConfig.InsecureSkipVerify {
+		return nil, errors.New("invalid Redis URL or TLS configuration")
+	}
+	if options.TLSConfig.MinVersion < tls.VersionTLS12 {
+		options.TLSConfig.MinVersion = tls.VersionTLS12
+	}
+	return redis.NewClient(options), nil
+}
+
+func newMigrator(cfg config.Config, redisClient redis.UniversalClient, log *slog.Logger) (migration.Runner, error) {
+	profiles, err := profile.New(cfg.LegacyBaseURL, profile.Options{Timeout: cfg.RequestTimeout})
+	if err != nil {
+		return nil, err
+	}
+	downloader, err := texture.New(texture.Options{Timeout: cfg.RequestTimeout})
+	if err != nil {
+		return nil, err
+	}
+	snapshotter, err := migration.New(profiles, downloader, migration.Options{})
+	if err != nil {
+		return nil, err
+	}
+	staging, err := migration.NewRedisStore(redisClient, migration.RedisOptions{
+		TTL:             cfg.MigrationTTL,
+		MaxPackageBytes: cfg.MigrationMaxPackageBytes,
+	})
+	if err != nil {
+		return nil, err
+	}
+	committer, err := migration.NewClient(cfg.ArmorialBaseURL, cfg.MigrationServiceToken, migration.ClientOptions{
+		Timeout: cfg.MigrationTimeout,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return migration.NewService(snapshotter, staging, committer, log)
 }
