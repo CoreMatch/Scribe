@@ -146,6 +146,96 @@ func TestRedisIdentifierRetryDoesNotRefreshMissingPackageIndex(t *testing.T) {
 	}
 }
 
+func TestRedisActiveMigrationsOutliveStagingTTL(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{TTL: time.Hour})
+	identifierDigest := sha256.Sum256([]byte("Player@example.com"))
+	identifierHash := hex.EncodeToString(identifierDigest[:])
+	record, created, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t))
+	if err != nil || !created {
+		t.Fatalf("Stage() = %+v, %v, %v", record, created, err)
+	}
+	for _, next := range []State{StateApplying, StateReconciling, StateUnknown, StateReconciling, StateRollingBack, StateCommitted, StateLocked} {
+		if next == StateRollingBack {
+			record = confirmTestRollback(t, store, record)
+		} else {
+			record, err = store.Transition(context.Background(), record.MigrationID, record.Version, next)
+			if err != nil {
+				t.Fatalf("Transition(%s): %v", next, err)
+			}
+		}
+		if next == StateApplying {
+			retryID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+			retried, created, err := store.Stage(context.Background(), retryID, identifierHash, validDigestSnapshot(t))
+			if err != nil || created || retried.State != StateApplying {
+				t.Fatalf("active retry = %+v, %v, %v", retried, created, err)
+			}
+		}
+		ttl := time.Duration(0)
+		if next == StateLocked {
+			ttl = time.Hour
+		}
+		for _, key := range []string{stagingKey(record.MigrationID), identifierIndexKey(identifierHash)} {
+			if got := server.TTL(key); got != ttl {
+				t.Fatalf("TTL(%q) in %s = %v, want %v", key, next, got, ttl)
+			}
+		}
+		server.FastForward(2 * time.Hour)
+		loaded, err := store.Load(context.Background(), record.MigrationID)
+		if next == StateLocked {
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("locked migration did not expire: %+v, %v", loaded, err)
+			}
+			continue
+		}
+		if err != nil || loaded.State != next {
+			t.Fatalf("Load() in %s = %+v, %v", next, loaded, err)
+		}
+		if pending, err := store.Pending(context.Background(), "Player@Example.COM"); err != nil || !pending {
+			t.Fatalf("Pending() in %s = %v, %v", next, pending, err)
+		}
+	}
+}
+
+func TestRedisTransitionRejectsMismatchedIdentifierIndex(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	identifierHash := strings.Repeat("ab", 32)
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(context.Background(), identifierIndexKey(identifierHash), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying); !errors.Is(err, ErrCorruptStaging) {
+		t.Fatalf("Transition() error = %v", err)
+	}
+	record, err := store.Load(context.Background(), testMigrationID)
+	if err != nil || record.State != StateStagedInRedis || record.Version != 1 {
+		t.Fatalf("record changed despite corrupt index: %+v, %v", record, err)
+	}
+}
+
+func TestRedisTransitionRepairsMissingIdentifierIndex(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{TTL: time.Hour})
+	identifierHash := strings.Repeat("ab", 32)
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Del(context.Background(), identifierIndexKey(identifierHash)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying)
+	if err != nil || record.State != StateApplying {
+		t.Fatalf("Transition() = %+v, %v", record, err)
+	}
+	indexed, err := client.Get(context.Background(), identifierIndexKey(identifierHash)).Result()
+	if err != nil || indexed != testMigrationID || server.TTL(identifierIndexKey(identifierHash)) != 0 {
+		t.Fatalf("repaired index = %q, TTL = %v, error = %v", indexed, server.TTL(identifierIndexKey(identifierHash)), err)
+	}
+}
+
 func TestRedisStageWithoutAssets(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := testRedisStore(t, server, RedisOptions{})
@@ -536,6 +626,10 @@ func TestRedisPendingUsesNormalizedIdentifierIndex(t *testing.T) {
 	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRolledBack)
 	if err != nil {
 		t.Fatal(err)
+	}
+	server.FastForward(25 * time.Hour)
+	if _, err := store.Load(context.Background(), record.MigrationID); err != nil {
+		t.Fatalf("rolled-back staging expired before discard: %v", err)
 	}
 	if _, err := store.Transition(context.Background(), testMigrationID, record.Version, StateDiscarded); err != nil {
 		t.Fatal(err)

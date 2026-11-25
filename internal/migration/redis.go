@@ -95,8 +95,14 @@ if indexed then
   local existing_key = 'scribe:migration:' .. indexed
   local payload = redis.call('HGET', existing_key, 'payload')
   if payload then
-    redis.call('PEXPIRE', existing_key, ttl)
-    redis.call('PEXPIRE', KEYS[2], ttl)
+    local state = redis.call('HGET', existing_key, 'state')
+    if state == 'STAGED_IN_REDIS' or state == 'LOCKED' then
+      redis.call('PEXPIRE', existing_key, ttl)
+      redis.call('PEXPIRE', KEYS[2], ttl)
+    else
+      redis.call('PERSIST', existing_key)
+      redis.call('PERSIST', KEYS[2])
+    end
   end
   if indexed == ARGV[8] then
     if payload then
@@ -108,7 +114,12 @@ if indexed then
 end
 local existing = redis.call('HGET', KEYS[1], 'payload')
 if existing then
-  redis.call('PEXPIRE', KEYS[1], ttl)
+  local state = redis.call('HGET', KEYS[1], 'state')
+  if state == 'STAGED_IN_REDIS' or state == 'LOCKED' then
+    redis.call('PEXPIRE', KEYS[1], ttl)
+  else
+    redis.call('PERSIST', KEYS[1])
+  end
   return existing
 end
 redis.call('SET', KEYS[2], ARGV[8], 'PX', ttl)
@@ -147,6 +158,31 @@ local current = redis.call('HGET', KEYS[1], 'state')
 local next_state = ARGV[2]
 if not transitions[current] or not transitions[current][next_state] then
   return -2
+end
+local payload = redis.call('HGET', KEYS[1], 'payload')
+if not payload then
+  return -3
+end
+local payload_valid, decoded = pcall(cjson.decode, payload)
+if not payload_valid or type(decoded) ~= 'table' or type(decoded.identifier_hash) ~= 'string' or
+  decoded.identifier_hash == '' or decoded.migration_id ~= ARGV[5] then
+  return -3
+end
+local index_key = 'scribe:migration:identifier:' .. decoded.identifier_hash
+local indexed = redis.call('GET', index_key)
+if indexed and indexed ~= ARGV[5] then
+  return -3
+end
+if next_state == 'LOCKED' then
+  redis.call('PEXPIRE', KEYS[1], ARGV[4])
+  redis.call('SET', index_key, ARGV[5], 'PX', ARGV[4])
+else
+  redis.call('PERSIST', KEYS[1])
+  if indexed then
+    redis.call('PERSIST', index_key)
+  else
+    redis.call('SET', index_key, ARGV[5])
+  end
 end
 redis.call('HSET', KEYS[1], 'state', next_state, 'version', tonumber(ARGV[1]) + 1, 'updated_at', ARGV[3])
 return 1
@@ -431,7 +467,7 @@ func (s *RedisStore) ConfirmRollback(ctx context.Context, migrationID string, ex
 }
 
 func (s *RedisStore) transition(ctx context.Context, migrationID string, expectedVersion int64, next State) (StagedMigration, error) {
-	result, err := s.client.Eval(ctx, transitionScript, []string{stagingKey(migrationID)}, expectedVersion, string(next), s.now().UTC().Format(time.RFC3339Nano)).Int64()
+	result, err := s.client.Eval(ctx, transitionScript, []string{stagingKey(migrationID)}, expectedVersion, string(next), s.now().UTC().Format(time.RFC3339Nano), s.ttl.Milliseconds(), migrationID).Int64()
 	if err != nil {
 		return StagedMigration{}, err
 	}
