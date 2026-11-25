@@ -56,6 +56,30 @@ func TestRateLimiterIsConcurrencySafe(t *testing.T) {
 	}
 }
 
+func TestRateLimitAuthenticationOnlyLimitsAuthenticate(t *testing.T) {
+	limiter := NewRateLimiter(1, 1, 10)
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := RateLimitAuthentication(limiter, next)
+	tests := []struct {
+		path string
+		want int
+	}{
+		{path: "/healthz", want: http.StatusNoContent},
+		{path: "/authserver/refresh", want: http.StatusNoContent},
+		{path: "/authserver/authenticate", want: http.StatusNoContent},
+		{path: "/authserver/authenticate", want: http.StatusTooManyRequests},
+	}
+	for _, tt := range tests {
+		request := httptest.NewRequest(http.MethodPost, tt.path, nil)
+		request.RemoteAddr = "192.0.2.10:1234"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != tt.want {
+			t.Fatalf("%s status = %d, want %d", tt.path, response.Code, tt.want)
+		}
+	}
+}
+
 func TestRateLimitMiddlewareUsesRemoteAddrOnly(t *testing.T) {
 	limiter := NewRateLimiter(1, 1, 10)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })

@@ -91,6 +91,17 @@ func RateLimit(limiter *RateLimiter, next http.Handler) http.Handler {
 	})
 }
 
+func RateLimitAuthentication(limiter *RateLimiter, next http.Handler) http.Handler {
+	limited := RateLimit(limiter, next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/authserver/authenticate" {
+			limited.ServeHTTP(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
