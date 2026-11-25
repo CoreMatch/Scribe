@@ -104,13 +104,13 @@ func writeProtocolError(w http.ResponseWriter, status int, errorName, message st
 }
 
 func removeHopByHopHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			header.Del(strings.TrimSpace(name))
+		}
+	}
 	for _, name := range hopByHopHeaders {
 		header.Del(name)
-	}
-	for name := range header {
-		if strings.EqualFold(name, "Connection") {
-			header.Del(name)
-		}
 	}
 }
 

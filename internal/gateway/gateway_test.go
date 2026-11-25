@@ -631,6 +631,26 @@ func TestGatewayRejectsInvalidRequestsAndInternalRoutes(t *testing.T) {
 	}
 }
 
+func TestRemoveHopByHopHeadersHonorsConnectionTokens(t *testing.T) {
+	header := http.Header{
+		"Connection":       {"X-Client-Hop, X-Other-Hop", "Keep-Alive"},
+		"X-Client-Hop":     {"secret"},
+		"X-Other-Hop":      {"secret"},
+		"Keep-Alive":       {"timeout=5"},
+		"Proxy-Connection": {"keep-alive"},
+		"X-End-To-End":     {"preserved"},
+	}
+	removeHopByHopHeaders(header)
+	for _, name := range []string{"Connection", "X-Client-Hop", "X-Other-Hop", "Keep-Alive", "Proxy-Connection"} {
+		if values := header.Values(name); len(values) != 0 {
+			t.Fatalf("hop-by-hop header %s survived: %#v", name, values)
+		}
+	}
+	if header.Get("X-End-To-End") != "preserved" {
+		t.Fatalf("end-to-end header was removed: %#v", header)
+	}
+}
+
 func TestGatewayEnforcesRequestBodyLimit(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
