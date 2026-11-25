@@ -76,6 +76,9 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 	if err != nil {
 		return Result{}, ErrInvalidCommit
 	}
+	if err := validateCommitCredentials(input.SelectedProfile, input.Password); err != nil {
+		return Result{}, err
+	}
 	snapshot, err := s.snapshots.Capture(ctx, input.SelectedProfile)
 	if err != nil {
 		return Result{}, err

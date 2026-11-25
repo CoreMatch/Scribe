@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -103,11 +102,15 @@ func (f *fakeCommitter) Commit(_ context.Context, request CommitRequest) (Commit
 	return f.result, f.err
 }
 
+func validServiceProfile(name string) protocol.Profile {
+	return protocol.Profile{ID: strings.Repeat("a", 32), Name: name}
+}
+
 func validServiceSnapshot(name string) Snapshot {
-	id := strings.Repeat("a", 32)
+	profile := validServiceProfile(name)
 	return Snapshot{
-		Profile:  protocol.SignedProfile{ID: id, Name: name},
-		Textures: protocol.Textures{ProfileID: id, ProfileName: name},
+		Profile:  protocol.SignedProfile{ID: profile.ID, Name: profile.Name},
+		Textures: protocol.Textures{ProfileID: profile.ID, ProfileName: profile.Name},
 	}
 }
 
@@ -171,7 +174,7 @@ func TestServiceFailureLogsExcludeCredentialsAndUpstreamDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Migrate(context.Background(), Input{Identifier: identifier, Password: password})
+	_, err = service.Migrate(context.Background(), Input{Identifier: identifier, Password: password, SelectedProfile: validServiceProfile("Player")})
 	if !errors.Is(err, upstreamDetail) {
 		t.Fatalf("Migrate() error = %v", err)
 	}
@@ -196,7 +199,7 @@ func TestServiceBlocksConcurrentApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret"})
+	_, err = service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret", SelectedProfile: validServiceProfile("Player")})
 	if !errors.Is(err, ErrMigrationInProgress) {
 		t.Fatalf("got %v, want ErrMigrationInProgress", err)
 	}
@@ -216,7 +219,7 @@ func TestServiceRetriesCommittedMigrationIdempotently(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret"}); err != nil {
+	if _, err := service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret", SelectedProfile: validServiceProfile("Player")}); err != nil {
 		t.Fatal(err)
 	}
 	if len(committer.calls) != 1 {
@@ -238,7 +241,7 @@ func TestServiceMovesFailedCommitToReconciling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret"})
+	_, err = service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret", SelectedProfile: validServiceProfile("Player")})
 	if err == nil {
 		t.Fatal("expected commit failure")
 	}
@@ -253,44 +256,57 @@ func TestServiceMovesFailedCommitToReconciling(t *testing.T) {
 	}
 }
 
-func TestServiceRejectsLocalCommitValidationBeforeApplying(t *testing.T) {
+func TestServiceRejectsInvalidCommitInputBeforeCapture(t *testing.T) {
 	for _, test := range []struct {
-		name           string
-		password       string
-		maxRequestBody int64
-		wantErr        error
+		name     string
+		password string
 	}{
-		{name: "Player", password: "short", wantErr: ErrInvalidCommit},
-		{name: "x", password: "secret", wantErr: ErrInvalidCommit},
-		{name: "Player", password: "secret", maxRequestBody: 1, wantErr: ErrCommitTooLarge},
+		{name: "Player", password: "short"},
+		{name: "x", password: "secret"},
 	} {
-		t.Run(test.name+"/"+test.password+"/"+fmt.Sprint(test.maxRequestBody), func(t *testing.T) {
-			snapshot := validServiceSnapshot(test.name)
-			staging := &fakeStagingStore{staged: StagedMigration{
-				MigrationID: "00000000-0000-4000-8000-000000000001",
-				State:       StateStagedInRedis,
-				Version:     1,
-			}}
-			committer, err := NewClient("https://127.0.0.1:1", "service-token", ClientOptions{MaxRequestBody: test.maxRequestBody})
-			if err != nil {
-				t.Fatal(err)
-			}
-			service, err := NewService(&fakeSnapshotCapturer{snapshot: snapshot}, staging, committer, nil)
+		t.Run(test.name+"/"+test.password, func(t *testing.T) {
+			capturer := &fakeSnapshotCapturer{}
+			staging := &fakeStagingStore{}
+			committer := &fakeCommitter{}
+			service, err := NewService(capturer, staging, committer, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			_, err = service.Migrate(context.Background(), Input{
 				Identifier:      "Player",
 				Password:        test.password,
-				SelectedProfile: protocol.Profile{ID: snapshot.Profile.ID, Name: snapshot.Profile.Name},
+				SelectedProfile: validServiceProfile(test.name),
 			})
-			if !errors.Is(err, test.wantErr) {
-				t.Fatalf("Migrate() error = %v, want %v", err, test.wantErr)
+			if !errors.Is(err, ErrInvalidCommit) {
+				t.Fatalf("Migrate() error = %v, want ErrInvalidCommit", err)
 			}
-			if len(staging.transitions) != 0 || staging.staged.State != StateStagedInRedis {
-				t.Fatalf("local validation changed migration state: transitions=%#v state=%s", staging.transitions, staging.staged.State)
+			if len(capturer.calls) != 0 || len(staging.stageCalls) != 0 || len(staging.transitions) != 0 || len(committer.calls) != 0 {
+				t.Fatalf("invalid input reached migration work: captures=%d stages=%d transitions=%#v commits=%d", len(capturer.calls), len(staging.stageCalls), staging.transitions, len(committer.calls))
 			}
 		})
+	}
+}
+
+func TestServiceRejectsOversizeCommitBeforeApplying(t *testing.T) {
+	staging := &fakeStagingStore{staged: StagedMigration{
+		MigrationID: "00000000-0000-4000-8000-000000000001",
+		State:       StateStagedInRedis,
+		Version:     1,
+	}}
+	committer, err := NewClient("https://127.0.0.1:1", "service-token", ClientOptions{MaxRequestBody: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret", SelectedProfile: validServiceProfile("Player")})
+	if !errors.Is(err, ErrCommitTooLarge) {
+		t.Fatalf("Migrate() error = %v, want ErrCommitTooLarge", err)
+	}
+	if len(staging.stageCalls) != 1 || len(staging.transitions) != 0 || staging.staged.State != StateStagedInRedis {
+		t.Fatalf("oversize commit changed migration state: stages=%d transitions=%#v state=%s", len(staging.stageCalls), staging.transitions, staging.staged.State)
 	}
 }
 
@@ -308,7 +324,7 @@ func TestServiceReturnsCommittedResultWhenBookkeepingFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret"})
+	result, err := service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret", SelectedProfile: validServiceProfile("Player")})
 	if err != nil || result.Commit.Status != "committed" {
 		t.Fatalf("committed result was lost: %#v, %v", result, err)
 	}
@@ -326,7 +342,7 @@ func TestServiceRecordsFailedCommitAfterRequestCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Migrate(ctx, Input{Identifier: "Player", Password: "secret"})
+	_, err = service.Migrate(ctx, Input{Identifier: "Player", Password: "secret", SelectedProfile: validServiceProfile("Player")})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Migrate() error = %v, want context.Canceled", err)
 	}
@@ -353,7 +369,7 @@ func TestServiceRecordsCommitAfterRequestCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.Migrate(ctx, Input{Identifier: "Player", Password: "secret"})
+	result, err := service.Migrate(ctx, Input{Identifier: "Player", Password: "secret", SelectedProfile: validServiceProfile("Player")})
 	if err != nil || result.Commit.Status != "committed" {
 		t.Fatalf("Migrate() = %#v, %v", result, err)
 	}

@@ -243,16 +243,24 @@ func (c *Client) Commit(ctx context.Context, request CommitRequest) (CommitResul
 	return result, nil
 }
 
+func validateCommitCredentials(profile protocol.Profile, password string) error {
+	if !protocol.ValidProfileID(profile.ID) || !validCommitName(profile.Name) ||
+		!utf8.ValidString(password) || utf8.RuneCountInString(password) < 6 {
+		return ErrInvalidCommit
+	}
+	return nil
+}
+
 func buildCommitMetadata(request CommitRequest) (CommitMetadata, error) {
 	staged := request.Staged
-	if !validMigrationID(staged.MigrationID) || !protocol.ValidProfileID(staged.Profile.ID) || !validCommitName(staged.Profile.Name) {
+	if !validMigrationID(staged.MigrationID) {
 		return CommitMetadata{}, ErrInvalidCommit
+	}
+	if err := validateCommitCredentials(staged.Profile, request.Password); err != nil {
+		return CommitMetadata{}, err
 	}
 	identifier, err := protocol.NormalizeIdentifier(request.Identifier)
 	if err != nil {
-		return CommitMetadata{}, ErrInvalidCommit
-	}
-	if !utf8.ValidString(request.Password) || utf8.RuneCountInString(request.Password) < 6 {
 		return CommitMetadata{}, ErrInvalidCommit
 	}
 	identifierDigest := sha256.Sum256([]byte(identifier))
