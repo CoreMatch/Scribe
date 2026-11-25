@@ -78,12 +78,19 @@ func run(ctx context.Context, log *slog.Logger) error {
 	ready := func() error {
 		checkCtx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
 		defer cancel()
-		if err := redisClient.Ping(checkCtx).Err(); err != nil {
-			return errors.New("migration Redis is unavailable")
-		}
-		return nil
+		return checkReady(checkCtx, redisClient, store)
 	}
 	return server.New(cfg.ListenAddr, httpMux(cfg, gateway, ready), cfg.ShutdownTimeout, cfg.WriteTimeout, log).Run(ctx)
+}
+
+func checkReady(ctx context.Context, redisClient redis.UniversalClient, store *binding.SQLiteStore) error {
+	if err := redisClient.Ping(ctx).Err(); err != nil {
+		return errors.New("migration Redis is unavailable")
+	}
+	if err := store.Ping(ctx); err != nil {
+		return errors.New("binding store is unavailable")
+	}
+	return nil
 }
 
 func openRedis(rawURL string) (*redis.Client, error) {

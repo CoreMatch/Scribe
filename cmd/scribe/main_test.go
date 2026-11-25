@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +38,36 @@ func TestOpenRedisRequiresVerifiedTLS(t *testing.T) {
 	}
 	if options.DB != 1 || options.Username != "scribe" {
 		t.Fatalf("Redis URL options were not applied: %#v", options)
+	}
+}
+
+func TestCheckReadyRequiresRedisAndSQLite(t *testing.T) {
+	redisServer := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	defer redisClient.Close()
+	databasePath := filepath.Join(t.TempDir(), "scribe.db")
+	store, err := binding.OpenSQLite(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if err := checkReady(ctx, redisClient, store); err != nil {
+		t.Fatalf("checkReady() with healthy dependencies: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkReady(ctx, redisClient, store); err == nil || !strings.Contains(err.Error(), "binding store") {
+		t.Fatalf("checkReady() with closed SQLite = %v", err)
+	}
+	store, err = binding.OpenSQLite(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	redisServer.Close()
+	if err := checkReady(ctx, redisClient, store); err == nil || !strings.Contains(err.Error(), "Redis") {
+		t.Fatalf("checkReady() with closed Redis = %v", err)
 	}
 }
 
