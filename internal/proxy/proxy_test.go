@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"net/http"
@@ -58,6 +59,29 @@ func TestProxyMapsUpstreamFailureWithoutLeakingDetails(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "connection refused") {
 		t.Fatalf("response leaked upstream details: %s", response.Body.String())
+	}
+}
+
+func TestProxyFailureLogsExcludeRequestSecrets(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	upstream.Close()
+	target, _ := url.Parse(upstream.URL)
+	publicURL, _ := url.Parse("https://auth.example.com")
+	var logs bytes.Buffer
+	handler := New(target, publicURL, time.Second, slog.New(slog.NewTextHandler(&logs, nil)))
+	password := "correct-horse-battery-staple"
+	accessToken := "armorial-access-token-canary"
+	privateKey := "-----BEGIN PRIVATE KEY-----"
+	body := `{"username":"Player","password":"` + password + `","clientToken":"` + accessToken + `","key":"` + privateKey + `"}`
+	request := httptest.NewRequest(http.MethodPost, "https://scribe.example.com/authserver/authenticate?token="+accessToken, strings.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if logs.Len() == 0 {
+		t.Fatal("proxy failure was not logged")
+	}
+	for _, secret := range []string{password, accessToken, privateKey} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("proxy log leaked request secret %q: %s", secret, logs.String())
+		}
 	}
 }
 

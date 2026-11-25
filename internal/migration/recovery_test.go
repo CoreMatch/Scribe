@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -296,6 +297,30 @@ func TestRecoveryRunContinuesAfterPerMigrationFailure(t *testing.T) {
 	}
 	if len(client.calls) != 2 {
 		t.Fatalf("recovery calls = %#v, want both records attempted", client.calls)
+	}
+}
+
+func TestRecoveryFailureLogsExcludeUpstreamDetails(t *testing.T) {
+	const accessToken = "armorial-access-token-canary"
+	const privateKey = "-----BEGIN PRIVATE KEY-----"
+	record := recoveryRecord(t, StateReconciling)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileErr: errors.New(accessToken + " " + privateKey)}
+	var logs bytes.Buffer
+	recovery, err := NewRecovery(staging, client, &fakeRecoveryBindings{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recovery.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if logs.Len() == 0 {
+		t.Fatal("recovery failure was not logged")
+	}
+	for _, secret := range []string{accessToken, privateKey} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("recovery log leaked secret %q: %s", secret, logs.String())
+		}
 	}
 }
 

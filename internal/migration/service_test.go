@@ -1,6 +1,7 @@
 package migration
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -126,6 +127,37 @@ func TestServiceMigratesSelectedProfileAndCommitsBeforeReturning(t *testing.T) {
 	}
 	if len(committer.calls) != 1 || committer.calls[0].request.Identifier != "Player@example.com" || committer.calls[0].request.Password != "secret" {
 		t.Fatalf("unexpected commit calls: %#v", committer.calls)
+	}
+}
+
+func TestServiceFailureLogsExcludeCredentialsAndUpstreamDetails(t *testing.T) {
+	const password = "correct-horse-battery-staple"
+	const identifier = "sensitive-player@example.com"
+	const accessToken = "armorial-access-token-canary"
+	const privateKey = "-----BEGIN PRIVATE KEY-----"
+	staging := &fakeStagingStore{staged: StagedMigration{
+		MigrationID:    "00000000-0000-4000-8000-000000000001",
+		IdentifierHash: strings.Repeat("b", 64),
+		State:          StateStagedInRedis,
+		Version:        1,
+	}}
+	upstreamDetail := errors.New(strings.Join([]string{password, identifier, accessToken, privateKey}, " "))
+	var logs bytes.Buffer
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, &fakeCommitter{err: upstreamDetail}, slog.New(slog.NewTextHandler(&logs, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Migrate(context.Background(), Input{Identifier: identifier, Password: password})
+	if !errors.Is(err, upstreamDetail) {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+	if logs.Len() == 0 {
+		t.Fatal("migration failure was not logged")
+	}
+	for _, secret := range []string{password, identifier, accessToken, privateKey} {
+		if strings.Contains(logs.String(), secret) {
+			t.Fatalf("migration log leaked secret %q: %s", secret, logs.String())
+		}
 	}
 }
 
