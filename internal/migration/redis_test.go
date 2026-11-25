@@ -368,6 +368,16 @@ func TestRedisConfirmRollbackRequiresAuthoritativeStatus(t *testing.T) {
 		{MigrationID: testMigrationID, Status: MigrationApplying},
 		{MigrationID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Status: MigrationRolledBack},
 		{MigrationID: testMigrationID, Status: MigrationRolledBack, Result: &CommitResult{}},
+		{MigrationID: testMigrationID, Status: MigrationRolledBack, Resources: []MigrationResource{
+			{Kind: "profile", ResourceID: strings.Repeat("a", 32), Ownership: "created_by_migration", Present: true},
+		}},
+		{MigrationID: testMigrationID, Status: MigrationRolledBack, Resources: []MigrationResource{
+			{Kind: "core_user", ResourceID: "42", Ownership: "preexisting", Present: false},
+		}},
+		{MigrationID: testMigrationID, Status: MigrationRolledBack, Resources: []MigrationResource{
+			{Kind: "profile", ResourceID: strings.Repeat("a", 32), Ownership: "created_by_migration", Present: false},
+			{Kind: "profile", ResourceID: strings.Repeat("a", 32), Ownership: "preexisting", Present: true},
+		}},
 	} {
 		if _, err := store.ConfirmRollback(context.Background(), testMigrationID, record.Version, status); !errors.Is(err, ErrInvalidResponse) {
 			t.Fatalf("ConfirmRollback(%+v) error = %v", status, err)

@@ -44,6 +44,9 @@ func (f *fakeRecoveryStaging) ConfirmRollback(ctx context.Context, migrationID s
 	if status.Status != MigrationRolledBack || !strings.EqualFold(status.MigrationID, migrationID) || status.Result != nil {
 		return StagedMigration{}, ErrInvalidResponse
 	}
+	if err := validateResourceInventory(status); err != nil {
+		return StagedMigration{}, err
+	}
 	return f.Transition(ctx, migrationID, version, StateRollingBack)
 }
 
@@ -164,6 +167,31 @@ func TestRecoveryRollsBackIncompleteMigrationAndDiscardsStaging(t *testing.T) {
 	}
 	if !reflect.DeepEqual(client.calls, []string{"reconcile", "rollback"}) {
 		t.Fatalf("recovery calls = %#v", client.calls)
+	}
+}
+
+func TestRecoveryRejectsRollbackWithResidualResources(t *testing.T) {
+	record := recoveryRecord(t, StateReconciling)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{
+		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying},
+		rollbackStatus: MigrationStatus{
+			MigrationID: record.MigrationID,
+			Status:      MigrationRolledBack,
+			Resources: []MigrationResource{{
+				Kind:       "profile",
+				ResourceID: record.Profile.ID,
+				Ownership:  "created_by_migration",
+				Present:    true,
+			}},
+		},
+	}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("recover() error = %v", err)
+	}
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 {
+		t.Fatalf("transitions = %#v, discards = %#v", staging.transitions, staging.discards)
 	}
 }
 

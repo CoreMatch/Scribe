@@ -424,6 +424,9 @@ func (s *RedisStore) ConfirmRollback(ctx context.Context, migrationID string, ex
 		status.Status != MigrationRolledBack || status.Result != nil {
 		return StagedMigration{}, ErrInvalidResponse
 	}
+	if err := validateResourceInventory(status); err != nil {
+		return StagedMigration{}, err
+	}
 	return s.transition(ctx, migrationID, expectedVersion, StateRollingBack)
 }
 

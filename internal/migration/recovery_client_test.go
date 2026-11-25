@@ -139,6 +139,20 @@ func TestRecoveryOperationsRejectInvalidStatusResponses(t *testing.T) {
 		{name: "invalid error stage", mutate: func(data map[string]any) {
 			data["last_error"] = map[string]any{"code": "failed", "message": "detail", "stage": "invalid"}
 		}},
+		{name: "rolled back with residual owned resource", mutate: func(data map[string]any) {
+			data["status"] = MigrationRolledBack
+			data["resources"] = []map[string]any{{"kind": "profile", "resource_id": strings.Repeat("a", 32), "ownership": "created_by_migration", "present": true}}
+		}},
+		{name: "rolled back with missing preexisting resource", mutate: func(data map[string]any) {
+			data["status"] = MigrationRolledBack
+			data["resources"] = []map[string]any{{"kind": "core_user", "resource_id": "42", "ownership": "preexisting", "present": false}}
+		}},
+		{name: "contradictory duplicate resource", mutate: func(data map[string]any) {
+			data["resources"] = []map[string]any{
+				{"kind": "profile", "resource_id": strings.Repeat("a", 32), "ownership": "created_by_migration", "present": true},
+				{"kind": "profile", "resource_id": strings.Repeat("a", 32), "ownership": "preexisting", "present": true},
+			}
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -158,6 +172,29 @@ func TestRecoveryOperationsRejectInvalidStatusResponses(t *testing.T) {
 				t.Fatalf("Reconcile() error = %v", err)
 			}
 		})
+	}
+}
+
+func TestRecoveryStatusAcceptsCompletedRollbackInventory(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"data": map[string]any{
+				"migration_id": testMigrationID,
+				"status":       MigrationRolledBack,
+				"updated_at":   time.Now().UTC(),
+				"resources": []map[string]any{
+					{"kind": "core_user", "resource_id": "42", "ownership": "created_by_migration", "present": false},
+					{"kind": "core_user", "resource_id": "43", "ownership": "preexisting", "present": true},
+				},
+			},
+		})
+	}))
+	defer server.Close()
+	client := localCommitClient(t, server, ClientOptions{})
+	status, err := client.Reconcile(context.Background(), testMigrationID)
+	if err != nil || status.Status != MigrationRolledBack || len(status.Resources) != 2 {
+		t.Fatalf("rollback status = %+v, error = %v", status, err)
 	}
 }
 

@@ -139,9 +139,7 @@ func decodeMigrationStatus(wire migrationStatusWire, migrationID string) (Migrat
 		Resources:   make([]MigrationResource, 0, len(*wire.Resources)),
 	}
 	for _, resource := range *wire.Resources {
-		if resource.Kind == nil || resource.ResourceID == nil || resource.Ownership == nil || resource.Present == nil ||
-			!validResourceKind(*resource.Kind) || *resource.ResourceID == "" ||
-			(*resource.Ownership != "created_by_migration" && *resource.Ownership != "preexisting") {
+		if resource.Kind == nil || resource.ResourceID == nil || resource.Ownership == nil || resource.Present == nil {
 			return MigrationStatus{}, ErrInvalidResponse
 		}
 		status.Resources = append(status.Resources, MigrationResource{
@@ -150,6 +148,9 @@ func decodeMigrationStatus(wire migrationStatusWire, migrationID string) (Migrat
 			Ownership:  *resource.Ownership,
 			Present:    *resource.Present,
 		})
+	}
+	if err := validateResourceInventory(status); err != nil {
+		return MigrationStatus{}, err
 	}
 	if wire.Result != nil {
 		if wire.Result.AccountID == nil {
@@ -170,6 +171,36 @@ func decodeMigrationStatus(wire migrationStatusWire, migrationID string) (Migrat
 		status.LastError = &MigrationError{Code: safeErrorCode(*lastError.Code), Stage: *lastError.Stage}
 	}
 	return status, nil
+}
+
+func validateResourceInventory(status MigrationStatus) error {
+	type resourceIdentity struct {
+		kind string
+		id   string
+	}
+	seen := make(map[resourceIdentity]MigrationResource, len(status.Resources))
+	for _, resource := range status.Resources {
+		if !validResourceKind(resource.Kind) || resource.ResourceID == "" ||
+			(resource.Ownership != "created_by_migration" && resource.Ownership != "preexisting") {
+			return ErrInvalidResponse
+		}
+		identity := resourceIdentity{kind: resource.Kind, id: resource.ResourceID}
+		if previous, ok := seen[identity]; ok {
+			if previous != resource {
+				return ErrInvalidResponse
+			}
+			continue
+		}
+		seen[identity] = resource
+		if status.Status == MigrationRolledBack {
+			residual := resource.Ownership == "created_by_migration" && resource.Present
+			missingPreexisting := resource.Ownership == "preexisting" && !resource.Present
+			if residual || missingPreexisting {
+				return ErrInvalidResponse
+			}
+		}
+	}
+	return nil
 }
 
 func validateRecoveredCommitResult(result CommitResult, migrationID string) error {
