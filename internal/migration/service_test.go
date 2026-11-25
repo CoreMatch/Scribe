@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -38,6 +39,7 @@ type fakeStagingStore struct {
 	stageCalls    []stageCall
 	transitions   []State
 	transitionErr error
+	contextErrs   []error
 }
 
 func (f *fakeStagingStore) Stage(_ context.Context, id, identifierHash string, snapshot Snapshot) (StagedMigration, bool, error) {
@@ -51,8 +53,12 @@ func (f *fakeStagingStore) Stage(_ context.Context, id, identifierHash string, s
 	return f.staged, false, nil
 }
 
-func (f *fakeStagingStore) Transition(_ context.Context, _ string, _ int64, next State) (StagedMigration, error) {
+func (f *fakeStagingStore) Transition(ctx context.Context, _ string, _ int64, next State) (StagedMigration, error) {
 	f.transitions = append(f.transitions, next)
+	f.contextErrs = append(f.contextErrs, ctx.Err())
+	if ctx.Err() != nil {
+		return StagedMigration{}, ctx.Err()
+	}
 	if f.transitionErr != nil && next == StateCommitted {
 		return StagedMigration{}, f.transitionErr
 	}
@@ -69,10 +75,14 @@ type fakeCommitter struct {
 	result CommitResult
 	err    error
 	calls  []commitCall
+	before func()
 }
 
 func (f *fakeCommitter) Commit(_ context.Context, request CommitRequest) (CommitResult, error) {
 	f.calls = append(f.calls, commitCall{request: request})
+	if f.before != nil {
+		f.before()
+	}
 	return f.result, f.err
 }
 
@@ -204,6 +214,60 @@ func TestServiceReturnsCommittedResultWhenBookkeepingFails(t *testing.T) {
 	result, err := service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret"})
 	if err != nil || result.Commit.Status != "committed" {
 		t.Fatalf("committed result was lost: %#v, %v", result, err)
+	}
+}
+
+func TestServiceRecordsFailedCommitAfterRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	committer := &fakeCommitter{err: context.Canceled, before: cancel}
+	staging := &fakeStagingStore{staged: StagedMigration{
+		MigrationID: "00000000-0000-4000-8000-000000000001",
+		State:       StateStagedInRedis,
+		Version:     1,
+	}}
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Migrate(ctx, Input{Identifier: "Player", Password: "secret"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Migrate() error = %v, want context.Canceled", err)
+	}
+	want := []State{StateApplying, StateReconciling}
+	if !reflect.DeepEqual(staging.transitions, want) {
+		t.Fatalf("transitions = %#v, want %#v", staging.transitions, want)
+	}
+	for _, contextErr := range staging.contextErrs {
+		if contextErr != nil {
+			t.Fatalf("bookkeeping inherited cancellation: %v", contextErr)
+		}
+	}
+}
+
+func TestServiceRecordsCommitAfterRequestCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	committer := &fakeCommitter{result: CommitResult{Status: "committed"}, before: cancel}
+	staging := &fakeStagingStore{staged: StagedMigration{
+		MigrationID: "00000000-0000-4000-8000-000000000001",
+		State:       StateStagedInRedis,
+		Version:     1,
+	}}
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Migrate(ctx, Input{Identifier: "Player", Password: "secret"})
+	if err != nil || result.Commit.Status != "committed" {
+		t.Fatalf("Migrate() = %#v, %v", result, err)
+	}
+	want := []State{StateApplying, StateCommitted}
+	if !reflect.DeepEqual(staging.transitions, want) {
+		t.Fatalf("transitions = %#v, want %#v", staging.transitions, want)
+	}
+	for _, contextErr := range staging.contextErrs {
+		if contextErr != nil {
+			t.Fatalf("bookkeeping inherited cancellation: %v", contextErr)
+		}
 	}
 }
 

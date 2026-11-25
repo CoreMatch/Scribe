@@ -109,12 +109,13 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 		LegacyUserID:         input.LegacyUserID,
 		LegacyUserProperties: input.LegacyUserProperties,
 	})
+	bookkeepingCtx := context.WithoutCancel(ctx)
 	if err != nil {
-		_, _ = s.staging.Transition(ctx, staged.MigrationID, staged.Version, StateReconciling)
+		_, _ = s.staging.Transition(bookkeepingCtx, staged.MigrationID, staged.Version, StateReconciling)
 		s.log.Info("migration commit failed", "migration_id", staged.MigrationID, "reason", "upstream_or_validation")
 		return Result{}, err
 	}
-	if _, err := s.staging.Transition(ctx, staged.MigrationID, staged.Version, StateCommitted); err != nil {
+	if _, err := s.staging.Transition(bookkeepingCtx, staged.MigrationID, staged.Version, StateCommitted); err != nil {
 		s.log.Info("migration committed with pending bookkeeping", "migration_id", staged.MigrationID)
 	}
 	return Result{MigrationID: staged.MigrationID, Commit: commit}, nil
