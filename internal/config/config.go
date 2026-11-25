@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type Config struct {
@@ -16,6 +17,12 @@ type Config struct {
 	PublicBaseURL              string
 	LegacyBaseURL              string
 	ArmorialBaseURL            string
+	RedisURL                   string
+	MigrationServiceToken      string
+	MigrationTTL               time.Duration
+	MigrationMaxPackageBytes   int64
+	MigrationTimeout           time.Duration
+	WriteTimeout               time.Duration
 	SQLitePath                 string
 	RequestTimeout             time.Duration
 	ShutdownTimeout            time.Duration
@@ -34,6 +41,12 @@ func Load() (Config, error) {
 		PublicBaseURL:              os.Getenv("SCRIBE_PUBLIC_BASE_URL"),
 		LegacyBaseURL:              os.Getenv("SCRIBE_LEGACY_BASE_URL"),
 		ArmorialBaseURL:            os.Getenv("SCRIBE_ARMIORIAL_BASE_URL"),
+		RedisURL:                   os.Getenv("SCRIBE_REDIS_URL"),
+		MigrationServiceToken:      os.Getenv("SCRIBE_MIGRATION_SERVICE_TOKEN"),
+		MigrationTTL:               24 * time.Hour,
+		MigrationMaxPackageBytes:   16 << 20,
+		MigrationTimeout:           60 * time.Second,
+		WriteTimeout:               150 * time.Second,
 		SQLitePath:                 env("SCRIBE_SQLITE_PATH", "data/scribe.db"),
 		RequestTimeout:             15 * time.Second,
 		ShutdownTimeout:            15 * time.Second,
@@ -51,6 +64,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	if cfg.ShutdownTimeout, err = durationEnv("SCRIBE_SHUTDOWN_TIMEOUT", cfg.ShutdownTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.WriteTimeout, err = durationEnv("SCRIBE_WRITE_TIMEOUT", cfg.WriteTimeout); err != nil {
+		return Config{}, err
+	}
+	if cfg.MigrationTTL, err = durationEnv("SCRIBE_MIGRATION_TTL", cfg.MigrationTTL); err != nil {
+		return Config{}, err
+	}
+	if cfg.MigrationMaxPackageBytes, err = int64Env("SCRIBE_MIGRATION_MAX_PACKAGE_BYTES", cfg.MigrationMaxPackageBytes); err != nil {
+		return Config{}, err
+	}
+	if cfg.MigrationTimeout, err = durationEnv("SCRIBE_MIGRATION_TIMEOUT", cfg.MigrationTimeout); err != nil {
 		return Config{}, err
 	}
 	if cfg.MaxRequestBody, err = int64Env("SCRIBE_MAX_REQUEST_BODY", cfg.MaxRequestBody); err != nil {
@@ -105,6 +130,29 @@ func (c Config) Validate() error {
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("SCRIBE_SHUTDOWN_TIMEOUT must be positive")
 	}
+	if c.WriteTimeout <= 0 {
+		return errors.New("SCRIBE_WRITE_TIMEOUT must be positive")
+	}
+	if c.WriteTimeout < c.MigrationTimeout {
+		return errors.New("SCRIBE_WRITE_TIMEOUT must not be shorter than SCRIBE_MIGRATION_TIMEOUT")
+	}
+	if c.MigrationTTL <= 0 {
+		return errors.New("SCRIBE_MIGRATION_TTL must be positive")
+	}
+	if c.MigrationMaxPackageBytes <= 0 {
+		return errors.New("SCRIBE_MIGRATION_MAX_PACKAGE_BYTES must be positive")
+	}
+	if c.MigrationTimeout <= 0 {
+		return errors.New("SCRIBE_MIGRATION_TIMEOUT must be positive")
+	}
+	if err := validateRedisURL(c.RedisURL); err != nil {
+		return err
+	}
+	if c.MigrationServiceToken == "" || len(c.MigrationServiceToken) > 8192 || strings.IndexFunc(c.MigrationServiceToken, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) >= 0 {
+		return errors.New("SCRIBE_MIGRATION_SERVICE_TOKEN must be nonempty and contain no whitespace or control characters")
+	}
 	if c.MaxRequestBody <= 0 {
 		return errors.New("SCRIBE_MAX_REQUEST_BODY must be positive")
 	}
@@ -125,6 +173,23 @@ func (c Config) Validate() error {
 	}
 	if c.CircuitHalfOpenMaxRequests == 0 {
 		return errors.New("SCRIBE_CIRCUIT_HALF_OPEN_MAX_REQUESTS must be positive")
+	}
+	return nil
+}
+
+func validateRedisURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "rediss" || u.Hostname() == "" || u.Fragment != "" {
+		return errors.New("SCRIBE_REDIS_URL must be an absolute rediss URL without a fragment")
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil {
+		return errors.New("SCRIBE_REDIS_URL has invalid query parameters")
+	}
+	for _, value := range query["skip_verify"] {
+		if strings.EqualFold(value, "true") || value == "1" {
+			return errors.New("SCRIBE_REDIS_URL must verify TLS certificates")
+		}
 	}
 	return nil
 }

@@ -10,6 +10,8 @@ func TestLoadRequiresUpstreamConfiguration(t *testing.T) {
 	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "")
 	t.Setenv("SCRIBE_LEGACY_BASE_URL", "")
 	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "")
+	t.Setenv("SCRIBE_REDIS_URL", "")
+	t.Setenv("SCRIBE_MIGRATION_SERVICE_TOKEN", "")
 
 	_, err := Load()
 	if err == nil || !strings.Contains(err.Error(), "SCRIBE_PUBLIC_BASE_URL") {
@@ -18,6 +20,7 @@ func TestLoadRequiresUpstreamConfiguration(t *testing.T) {
 }
 
 func TestLoadReadsOverrides(t *testing.T) {
+	setMigrationEnvironment(t)
 	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
 	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
 	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "https://armorial.internal")
@@ -31,6 +34,12 @@ func TestLoadReadsOverrides(t *testing.T) {
 	t.Setenv("SCRIBE_CIRCUIT_FAILURE_THRESHOLD", "3")
 	t.Setenv("SCRIBE_CIRCUIT_OPEN_TIMEOUT", "4s")
 	t.Setenv("SCRIBE_CIRCUIT_HALF_OPEN_MAX_REQUESTS", "2")
+	t.Setenv("SCRIBE_REDIS_URL", "rediss://scribe:secret@redis.internal:6379/1")
+	t.Setenv("SCRIBE_MIGRATION_SERVICE_TOKEN", "migration-service-token")
+	t.Setenv("SCRIBE_MIGRATION_TTL", "2h")
+	t.Setenv("SCRIBE_MIGRATION_MAX_PACKAGE_BYTES", "8388608")
+	t.Setenv("SCRIBE_MIGRATION_TIMEOUT", "45s")
+	t.Setenv("SCRIBE_WRITE_TIMEOUT", "90s")
 
 	cfg, err := Load()
 	if err != nil {
@@ -45,9 +54,16 @@ func TestLoadReadsOverrides(t *testing.T) {
 	if cfg.CircuitFailureThreshold != 3 || cfg.CircuitOpenTimeout != 4*time.Second || cfg.CircuitHalfOpenMaxRequests != 2 {
 		t.Fatalf("Load() circuit overrides not applied: %+v", cfg)
 	}
+	if cfg.RedisURL != "rediss://scribe:secret@redis.internal:6379/1" || cfg.MigrationServiceToken != "migration-service-token" {
+		t.Fatalf("Load() migration credentials not applied: %+v", cfg)
+	}
+	if cfg.MigrationTTL != 2*time.Hour || cfg.MigrationMaxPackageBytes != 8<<20 || cfg.MigrationTimeout != 45*time.Second || cfg.WriteTimeout != 90*time.Second {
+		t.Fatalf("Load() migration limits not applied: %+v", cfg)
+	}
 }
 
 func TestLoadRejectsInvalidNumericOverrides(t *testing.T) {
+	setMigrationEnvironment(t)
 	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
 	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
 	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "https://armorial.internal")
@@ -59,6 +75,73 @@ func TestLoadRejectsInvalidNumericOverrides(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadRequiresMigrationConfiguration(t *testing.T) {
+	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
+	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
+	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "https://armorial.internal")
+	t.Setenv("SCRIBE_REDIS_URL", "")
+	t.Setenv("SCRIBE_MIGRATION_SERVICE_TOKEN", "service-token")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SCRIBE_REDIS_URL") {
+		t.Fatalf("Load() error = %v, want missing Redis URL", err)
+	}
+	t.Setenv("SCRIBE_REDIS_URL", "rediss://redis.internal:6379/0")
+	t.Setenv("SCRIBE_MIGRATION_SERVICE_TOKEN", "")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SCRIBE_MIGRATION_SERVICE_TOKEN") {
+		t.Fatalf("Load() error = %v, want missing service token", err)
+	}
+}
+
+func TestValidateRedisURL(t *testing.T) {
+	for _, raw := range []string{
+		"",
+		"redis://redis.internal:6379/0",
+		"rediss:///0",
+		"rediss://redis.internal:6379/0#fragment",
+		"rediss://redis.internal:6379/0?skip_verify=true",
+		"rediss://redis.internal:6379/0?skip_verify=1",
+	} {
+		if err := validateRedisURL(raw); err == nil {
+			t.Fatalf("validateRedisURL(%q) unexpectedly succeeded", raw)
+		}
+	}
+	if err := validateRedisURL("rediss://scribe:secret@redis.internal:6379/1"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadRejectsInvalidMigrationToken(t *testing.T) {
+	setMigrationEnvironment(t)
+	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
+	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
+	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "https://armorial.internal")
+	for _, token := range []string{"has space", "has\ttab", "has\nnewline"} {
+		t.Run(token, func(t *testing.T) {
+			t.Setenv("SCRIBE_MIGRATION_SERVICE_TOKEN", token)
+			if _, err := Load(); err == nil {
+				t.Fatalf("Load() accepted token %q", token)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsWriteTimeoutShorterThanMigration(t *testing.T) {
+	setMigrationEnvironment(t)
+	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
+	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
+	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "https://armorial.internal")
+	t.Setenv("SCRIBE_MIGRATION_TIMEOUT", "60s")
+	t.Setenv("SCRIBE_WRITE_TIMEOUT", "30s")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SCRIBE_WRITE_TIMEOUT") {
+		t.Fatalf("Load() error = %v, want write timeout error", err)
+	}
+}
+
+func setMigrationEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv("SCRIBE_REDIS_URL", "rediss://redis.internal:6379/0")
+	t.Setenv("SCRIBE_MIGRATION_SERVICE_TOKEN", "service-token")
 }
 
 func TestValidateRejectsInsecureOrInvalidBaseURLs(t *testing.T) {
