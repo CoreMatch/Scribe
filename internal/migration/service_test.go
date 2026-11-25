@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -87,6 +88,11 @@ type fakeCommitter struct {
 	err    error
 	calls  []commitCall
 	before func()
+}
+
+func (f *fakeCommitter) Validate(request CommitRequest) error {
+	_, err := buildCommitMetadata(request)
+	return err
 }
 
 func (f *fakeCommitter) Commit(_ context.Context, request CommitRequest) (CommitResult, error) {
@@ -249,20 +255,23 @@ func TestServiceMovesFailedCommitToReconciling(t *testing.T) {
 
 func TestServiceRejectsLocalCommitValidationBeforeApplying(t *testing.T) {
 	for _, test := range []struct {
-		name     string
-		password string
+		name           string
+		password       string
+		maxRequestBody int64
+		wantErr        error
 	}{
-		{name: "Player", password: "short"},
-		{name: "x", password: "secret"},
+		{name: "Player", password: "short", wantErr: ErrInvalidCommit},
+		{name: "x", password: "secret", wantErr: ErrInvalidCommit},
+		{name: "Player", password: "secret", maxRequestBody: 1, wantErr: ErrCommitTooLarge},
 	} {
-		t.Run(test.name+"/"+test.password, func(t *testing.T) {
+		t.Run(test.name+"/"+test.password+"/"+fmt.Sprint(test.maxRequestBody), func(t *testing.T) {
 			snapshot := validServiceSnapshot(test.name)
 			staging := &fakeStagingStore{staged: StagedMigration{
 				MigrationID: "00000000-0000-4000-8000-000000000001",
 				State:       StateStagedInRedis,
 				Version:     1,
 			}}
-			committer, err := NewClient("https://127.0.0.1:1", "service-token", ClientOptions{})
+			committer, err := NewClient("https://127.0.0.1:1", "service-token", ClientOptions{MaxRequestBody: test.maxRequestBody})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -275,8 +284,8 @@ func TestServiceRejectsLocalCommitValidationBeforeApplying(t *testing.T) {
 				Password:        test.password,
 				SelectedProfile: protocol.Profile{ID: snapshot.Profile.ID, Name: snapshot.Profile.Name},
 			})
-			if !errors.Is(err, ErrInvalidCommit) {
-				t.Fatalf("Migrate() error = %v, want ErrInvalidCommit", err)
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("Migrate() error = %v, want %v", err, test.wantErr)
 			}
 			if len(staging.transitions) != 0 || staging.staged.State != StateStagedInRedis {
 				t.Fatalf("local validation changed migration state: transitions=%#v state=%s", staging.transitions, staging.staged.State)

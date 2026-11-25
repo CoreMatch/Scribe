@@ -49,6 +49,7 @@ type StagingStore interface {
 }
 
 type Committer interface {
+	Validate(CommitRequest) error
 	Commit(context.Context, CommitRequest) (CommitResult, error)
 }
 
@@ -96,7 +97,7 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 		LegacyUserID:         input.LegacyUserID,
 		LegacyUserProperties: input.LegacyUserProperties,
 	}
-	if _, err := buildCommitMetadata(commitRequest); err != nil {
+	if err := s.committer.Validate(commitRequest); err != nil {
 		return Result{}, err
 	}
 	switch staged.State {

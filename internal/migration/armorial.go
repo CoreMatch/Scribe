@@ -171,17 +171,30 @@ func NewClient(rawBaseURL, serviceToken string, options ClientOptions) (*Client,
 	}, nil
 }
 
-func (c *Client) Commit(ctx context.Context, request CommitRequest) (CommitResult, error) {
+func (c *Client) Validate(request CommitRequest) error {
+	_, _, _, err := c.prepare(request)
+	return err
+}
+
+func (c *Client) prepare(request CommitRequest) (CommitMetadata, []byte, string, error) {
 	metadata, err := buildCommitMetadata(request)
 	if err != nil {
-		return CommitResult{}, err
+		return CommitMetadata{}, nil, "", err
 	}
 	body, contentType, err := encodeCommit(metadata, request.Staged)
 	if err != nil {
-		return CommitResult{}, ErrInvalidCommit
+		return CommitMetadata{}, nil, "", ErrInvalidCommit
 	}
 	if int64(len(body)) > c.maxRequestBody {
-		return CommitResult{}, ErrCommitTooLarge
+		return CommitMetadata{}, nil, "", ErrCommitTooLarge
+	}
+	return metadata, body, contentType, nil
+}
+
+func (c *Client) Commit(ctx context.Context, request CommitRequest) (CommitResult, error) {
+	metadata, body, contentType, err := c.prepare(request)
+	if err != nil {
+		return CommitResult{}, err
 	}
 	target := *c.baseURL
 	target.Path = "/internal/migrations/commit"
