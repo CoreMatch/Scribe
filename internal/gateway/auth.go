@@ -50,6 +50,18 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 	)
 	switch decision.Outcome {
 	case race.NewWins:
+		if g.migrationPending != nil {
+			pending, pendingErr := g.migrationPending.Pending(r.Context(), identifier)
+			if pendingErr != nil || pending {
+				reason := "migration_pending"
+				if pendingErr != nil {
+					reason = "migration_state_unknown"
+				}
+				g.log.Info("authentication blocked", "reason", reason)
+				writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
+				return
+			}
+		}
 		g.completeAuthentication(w, r, decision.Target, identifier, binding.Armorial, "", true)
 	case race.MigrateReuseCore, race.MigrateCreateCore:
 		g.migrate(w, r, request, identifier, decision)

@@ -85,6 +85,7 @@ func TestAuthenticateBindsNewWinnerAndNeverReraces(t *testing.T) {
 	}))
 	defer armorial.Close()
 	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+	env.gateway.migrationPending = &fakePendingChecker{}
 
 	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "armorial-token") {
@@ -179,6 +180,34 @@ func TestBoundUserDoesNotSwitchWhenWinnerFails(t *testing.T) {
 	}
 }
 
+func TestNewWinnerIsBlockedByPendingMigration(t *testing.T) {
+	for _, pendingErr := range []error{nil, errors.New("redis unavailable")} {
+		t.Run(fmt.Sprint(pendingErr), func(t *testing.T) {
+			legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusForbidden, `{"error":"ForbiddenOperationException"}`)
+			}))
+			defer legacy.Close()
+			armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, authenticationBody("premature-token", "Player", true))
+			}))
+			defer armorial.Close()
+			env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+			checker := &fakePendingChecker{pending: pendingErr == nil, err: pendingErr}
+			env.gateway.migrationPending = checker
+			response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player@Example.COM","password":"secret"}`)
+			if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "premature-token") {
+				t.Fatalf("pending migration response = %d %s", response.Code, response.Body.String())
+			}
+			if len(checker.calls) != 1 || checker.calls[0] != "Player@example.com" {
+				t.Fatalf("pending checks = %#v", checker.calls)
+			}
+			if _, err := env.store.GetBinding(context.Background(), "Player@example.com"); !errors.Is(err, binding.ErrNotFound) {
+				t.Fatalf("pending migration created a binding: %v", err)
+			}
+		})
+	}
+}
+
 func TestMigrationBranchesFailClosedWithoutBinding(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -230,6 +259,8 @@ func TestAuthenticateMigratesLegacyUserBeforeBinding(t *testing.T) {
 	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
 	migrator := &fakeMigrator{result: successfulMigration()}
 	env.gateway.migrator = migrator
+	checker := &fakePendingChecker{pending: true}
+	env.gateway.migrationPending = checker
 
 	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player@Example.COM","password":"secret"}`)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "migrated-token") {
@@ -240,6 +271,9 @@ func TestAuthenticateMigratesLegacyUserBeforeBinding(t *testing.T) {
 	}
 	if len(migrator.calls) != 1 {
 		t.Fatalf("migration calls = %d, want 1", len(migrator.calls))
+	}
+	if len(checker.calls) != 0 {
+		t.Fatalf("migration retry was blocked by pending check: %#v", checker.calls)
 	}
 	input := migrator.calls[0]
 	if input.Identifier != "Player@example.com" || input.Password != "secret" || input.SelectedProfile.Name != "LegacyPlayer" {
@@ -661,6 +695,20 @@ func TestGatewayEnforcesRequestBodyLimit(t *testing.T) {
 	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
 	if response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want 413", response.Code)
+	}
+}
+
+func TestGatewayRequiresPendingCheckerWithMigrator(t *testing.T) {
+	env := newTestGateway(t, "http://armorial.invalid", "http://legacy.invalid", race.IntentUnspecified)
+	_, err := New(Options{
+		PublicBaseURL:   "https://auth.example.com",
+		LegacyBaseURL:   "http://legacy.invalid",
+		ArmorialBaseURL: "http://armorial.invalid",
+		RequestTimeout:  time.Second,
+		Migrator:        &fakeMigrator{},
+	}, env.store, nil)
+	if err == nil || !strings.Contains(err.Error(), "pending checker") {
+		t.Fatalf("New() error = %v, want missing pending checker error", err)
 	}
 }
 

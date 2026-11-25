@@ -68,6 +68,9 @@ func New(options Options, store binding.Store, log *slog.Logger) (*Gateway, erro
 	if err != nil {
 		return nil, err
 	}
+	if options.Migrator != nil && options.MigrationPending == nil {
+		return nil, errors.New("migration pending checker is required")
+	}
 	if options.RequestTimeout <= 0 {
 		return nil, errors.New("request timeout must be positive")
 	}
