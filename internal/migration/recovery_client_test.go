@@ -116,6 +116,8 @@ func TestRecoveryOperationsRejectInvalidIDsBeforeSending(t *testing.T) {
 }
 
 func TestRecoveryOperationsRejectInvalidStatusResponses(t *testing.T) {
+	staged := stagedFromSnapshot(t, testMigrationID, "LegacyPlayer", validDigestSnapshot(t))
+	committedResult := successfulCommitResult(staged, "uploaded", "uploaded")
 	tests := []struct {
 		name   string
 		mutate func(map[string]any)
@@ -124,6 +126,10 @@ func TestRecoveryOperationsRejectInvalidStatusResponses(t *testing.T) {
 		{name: "unknown status", mutate: func(data map[string]any) { data["status"] = "invalid" }},
 		{name: "missing timestamp", mutate: func(data map[string]any) { data["updated_at"] = "" }},
 		{name: "missing resources", mutate: func(data map[string]any) { delete(data, "resources") }},
+		{name: "committed result on rolled-back status", mutate: func(data map[string]any) {
+			data["status"] = MigrationRolledBack
+			data["result"] = committedResult
+		}},
 		{name: "invalid resource kind", mutate: func(data map[string]any) {
 			data["resources"] = []map[string]any{{"kind": "invalid", "resource_id": "resource", "ownership": "preexisting", "present": true}}
 		}},

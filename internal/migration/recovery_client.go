@@ -128,7 +128,8 @@ func (c *Client) operation(ctx context.Context, action, migrationID string) (Mig
 
 func decodeMigrationStatus(wire migrationStatusWire, migrationID string) (MigrationStatus, error) {
 	if !validMigrationID(wire.MigrationID) || !strings.EqualFold(wire.MigrationID, migrationID) ||
-		!validMigrationStatus(wire.Status) || wire.UpdatedAt.IsZero() || wire.Resources == nil {
+		!validMigrationStatus(wire.Status) || wire.UpdatedAt.IsZero() || wire.Resources == nil ||
+		(wire.Result != nil && wire.Status != MigrationCommitted) {
 		return MigrationStatus{}, ErrInvalidResponse
 	}
 	status := MigrationStatus{
