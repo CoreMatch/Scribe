@@ -1,0 +1,20 @@
+services:
+  scribe:
+    build:
+      context: ..
+      dockerfile: Containerfile
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    ports:
+      - "8080:8080"
+    volumes:
+      - scribe-data:/data
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  scribe-data:

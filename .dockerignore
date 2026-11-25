@@ -1,0 +1,13 @@
+.git
+.gitignore
+.dockerignore
+.env
+.env.*
+!.env.example
+dist
+scribe
+data
+docs
+*.db
+*.db-shm
+*.db-wal
