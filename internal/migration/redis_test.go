@@ -440,6 +440,17 @@ func TestRedisStoreRejectsInvalidInputs(t *testing.T) {
 	if _, _, err := smallStore.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), snapshot); !errors.Is(err, ErrPackageTooLarge) {
 		t.Fatalf("Stage() error = %v", err)
 	}
+	unsafe := validDigestSnapshot(t)
+	skin := unsafe.Textures.Textures["SKIN"]
+	skin.Metadata = map[string]string{"model": "slim", "password": "secret"}
+	unsafe.Textures.Textures["SKIN"] = skin
+	identifierHash := strings.Repeat("ab", 32)
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, unsafe); !errors.Is(err, ErrInvalidSnapshot) {
+		t.Fatalf("unsafe metadata Stage() error = %v", err)
+	}
+	if count, err := store.client.Exists(context.Background(), stagingKey(testMigrationID), identifierIndexKey(identifierHash)).Result(); err != nil || count != 0 {
+		t.Fatalf("unsafe metadata created Redis keys: count=%d, err=%v", count, err)
+	}
 	if _, err := NewRedisStore(nil, RedisOptions{}); err == nil {
 		t.Fatal("NewRedisStore() accepted a nil client")
 	}

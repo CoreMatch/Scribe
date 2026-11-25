@@ -126,6 +126,16 @@ func TestCommitDigestRejectsInvalidSnapshots(t *testing.T) {
 			asset.Height = 0
 			s.Assets["SKIN"] = asset
 		}},
+		{name: "unknown texture metadata", mutate: func(s *Snapshot) {
+			skin := s.Textures.Textures["SKIN"]
+			skin.Metadata = map[string]string{"model": "slim", "password": "secret"}
+			s.Textures.Textures["SKIN"] = skin
+		}},
+		{name: "invalid texture model", mutate: func(s *Snapshot) {
+			skin := s.Textures.Textures["SKIN"]
+			skin.Metadata = map[string]string{"model": "unknown"}
+			s.Textures.Textures["SKIN"] = skin
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

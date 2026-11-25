@@ -76,12 +76,16 @@ func summarize(snapshot Snapshot, identifierHash string) (commitSummary, error) 
 			return commitSummary{}, fmt.Errorf("%w: invalid asset", ErrInvalidSnapshot)
 		}
 		pngHash := sha256.Sum256(asset.PNG)
+		metadata, err := migrationTextureMetadata(texture.Metadata)
+		if err != nil {
+			return commitSummary{}, err
+		}
 		assetSummary := &commitAssetSummary{
 			PixelSHA256: pixelHash,
 			PNGSHA256:   hex.EncodeToString(pngHash[:]),
 			Width:       asset.Width,
 			Height:      asset.Height,
-			Metadata:    texture.Metadata,
+			Metadata:    metadata,
 		}
 		if name == "SKIN" {
 			summary.Skin = assetSummary
@@ -90,6 +94,18 @@ func summarize(snapshot Snapshot, identifierHash string) (commitSummary, error) 
 		}
 	}
 	return summary, nil
+}
+
+func migrationTextureMetadata(metadata map[string]string) (map[string]string, error) {
+	if len(metadata) == 0 {
+		return nil, nil
+	}
+	for key, value := range metadata {
+		if key != "model" || (value != "default" && value != "slim") {
+			return nil, fmt.Errorf("%w: unsupported texture metadata", ErrInvalidSnapshot)
+		}
+	}
+	return map[string]string{"model": metadata["model"]}, nil
 }
 
 func validSnapshotIdentity(profile protocol.SignedProfile, textures protocol.Textures) bool {

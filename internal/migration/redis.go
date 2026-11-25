@@ -491,11 +491,15 @@ func stageAsset(snapshot Snapshot, name string) (*stagedAssetPayload, []byte, er
 	if !present {
 		return nil, nil, nil
 	}
+	metadata, err := migrationTextureMetadata(texture.Metadata)
+	if err != nil {
+		return nil, nil, err
+	}
 	return &stagedAssetPayload{
 		PixelSHA256: asset.PixelSHA256,
 		Width:       asset.Width,
 		Height:      asset.Height,
-		Metadata:    texture.Metadata,
+		Metadata:    metadata,
 	}, append([]byte(nil), asset.PNG...), nil
 }
 
