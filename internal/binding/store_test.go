@@ -109,6 +109,22 @@ func TestSQLiteTokenBindingRoutesToSameWinner(t *testing.T) {
 	}
 }
 
+func TestSQLiteTokenBindingByHash(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	bound, err := store.BindIfAbsent(ctx, "Player", Armorial, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindTokenByHash(ctx, "refreshed-token", bound.IdentifierHash, Armorial); err != nil {
+		t.Fatalf("BindTokenByHash() error = %v", err)
+	}
+	got, err := store.GetBindingByToken(ctx, "refreshed-token")
+	if err != nil || got.IdentifierHash != bound.IdentifierHash || got.Winner != Armorial {
+		t.Fatalf("GetBindingByToken() = %+v, %v", got, err)
+	}
+}
+
 func TestSQLiteStoresOnlyIdentifierAndTokenDigests(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "scribe.db")
 	store, err := OpenSQLite(path)

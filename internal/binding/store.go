@@ -29,9 +29,10 @@ var (
 )
 
 type Binding struct {
-	Winner      Winner
-	MigrationID string
-	CreatedAt   time.Time
+	IdentifierHash string
+	Winner         Winner
+	MigrationID    string
+	CreatedAt      time.Time
 }
 
 type Store interface {
@@ -39,6 +40,7 @@ type Store interface {
 	BindIfAbsent(ctx context.Context, identifier string, winner Winner, migrationID string) (Binding, error)
 	GetBindingByToken(ctx context.Context, accessToken string) (Binding, error)
 	BindToken(ctx context.Context, accessToken, identifier string, winner Winner) error
+	BindTokenByHash(ctx context.Context, accessToken, identifierHash string, winner Winner) error
 	Close() error
 }
 
@@ -155,9 +157,9 @@ ON CONFLICT(identifier_hash) DO NOTHING`, hash, winner, migrationID, now)
 		if err := tx.Commit(); err != nil {
 			return Binding{}, fmt.Errorf("commit binding: %w", err)
 		}
-		return Binding{Winner: winner, MigrationID: migrationID, CreatedAt: time.Unix(now, 0).UTC()}, nil
+		return Binding{IdentifierHash: hash, Winner: winner, MigrationID: migrationID, CreatedAt: time.Unix(now, 0).UTC()}, nil
 	}
-	existing, err := scanBinding(tx.QueryRowContext(ctx, `SELECT winner, migration_id, created_at FROM bindings WHERE identifier_hash = ?`, hash))
+	existing, err := scanBinding(tx.QueryRowContext(ctx, `SELECT identifier_hash, winner, migration_id, created_at FROM bindings WHERE identifier_hash = ?`, hash))
 	if err != nil {
 		return Binding{}, err
 	}
@@ -176,7 +178,7 @@ func (s *SQLiteStore) GetBindingByToken(ctx context.Context, accessToken string)
 		return Binding{}, err
 	}
 	row := s.db.QueryRowContext(ctx, `
-SELECT b.winner, b.migration_id, b.created_at
+SELECT b.identifier_hash, b.winner, b.migration_id, b.created_at
 FROM token_bindings t
 JOIN bindings b ON b.identifier_hash = t.identifier_hash
 WHERE t.token_hash = ? AND t.winner = b.winner`, hash)
@@ -188,13 +190,20 @@ WHERE t.token_hash = ? AND t.winner = b.winner`, hash)
 }
 
 func (s *SQLiteStore) BindToken(ctx context.Context, accessToken, identifier string, winner Winner) error {
+	identifierHash, err := digest(identifier)
+	if err != nil {
+		return err
+	}
+	return s.BindTokenByHash(ctx, accessToken, identifierHash, winner)
+}
+
+func (s *SQLiteStore) BindTokenByHash(ctx context.Context, accessToken, identifierHash string, winner Winner) error {
 	tokenHash, err := digest(accessToken)
 	if err != nil {
 		return err
 	}
-	identifierHash, err := digest(identifier)
-	if err != nil {
-		return err
+	if identifierHash == "" {
+		return errors.New("identifier hash must not be empty")
 	}
 	if !validWinner(winner) {
 		return errors.New("invalid token binding winner")
@@ -236,7 +245,7 @@ ON CONFLICT(token_hash) DO NOTHING`, tokenHash, identifierHash, winner, time.Now
 }
 
 func (s *SQLiteStore) getBindingByHash(ctx context.Context, hash string) (Binding, error) {
-	binding, err := scanBinding(s.db.QueryRowContext(ctx, `SELECT winner, migration_id, created_at FROM bindings WHERE identifier_hash = ?`, hash))
+	binding, err := scanBinding(s.db.QueryRowContext(ctx, `SELECT identifier_hash, winner, migration_id, created_at FROM bindings WHERE identifier_hash = ?`, hash))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Binding{}, ErrNotFound
 	}
@@ -250,7 +259,7 @@ type rowScanner interface {
 func scanBinding(row rowScanner) (Binding, error) {
 	var binding Binding
 	var createdAt int64
-	if err := row.Scan(&binding.Winner, &binding.MigrationID, &createdAt); err != nil {
+	if err := row.Scan(&binding.IdentifierHash, &binding.Winner, &binding.MigrationID, &createdAt); err != nil {
 		return Binding{}, err
 	}
 	binding.CreatedAt = time.Unix(createdAt, 0).UTC()
