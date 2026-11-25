@@ -150,7 +150,7 @@ func TestRecoveryRollsBackIncompleteMigrationAndDiscardsStaging(t *testing.T) {
 	if err := recovery.recover(context.Background(), record); err != nil {
 		t.Fatal(err)
 	}
-	wantTransitions := []State{StateRolledBack, StateDiscarded}
+	wantTransitions := []State{StateRollingBack, StateRolledBack, StateDiscarded}
 	if !reflect.DeepEqual(staging.transitions, wantTransitions) || !reflect.DeepEqual(staging.discards, []string{record.MigrationID}) {
 		t.Fatalf("rollback transitions = %#v, discards = %#v", staging.transitions, staging.discards)
 	}

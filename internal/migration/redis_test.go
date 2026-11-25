@@ -309,6 +309,41 @@ func TestRedisTransitionUsesCompareAndSet(t *testing.T) {
 	}
 }
 
+func TestRedisTransitionRejectsUnreconciledDiscard(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	if _, _, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, 1, StateDiscarded); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("staged discard error = %v", err)
+	}
+	record, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateReconciling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, next := range []State{StateRolledBack, StateDiscarded} {
+		if _, err := store.Transition(context.Background(), testMigrationID, record.Version, next); !errors.Is(err, ErrInvalidTransition) {
+			t.Fatalf("reconciling %s error = %v", next, err)
+		}
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRollingBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateUnknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, record.Version, StateDiscarded); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("unknown discard error = %v", err)
+	}
+}
+
 func TestRedisTransitionAllowsOneConcurrentWorker(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := testRedisStore(t, server, RedisOptions{})
@@ -433,7 +468,23 @@ func TestRedisPendingUsesNormalizedIdentifierIndex(t *testing.T) {
 	if pending, err := store.Pending(context.Background(), "OtherPlayer"); err != nil || pending {
 		t.Fatalf("Pending() for another identifier = %v, %v", pending, err)
 	}
-	if _, err := store.Transition(context.Background(), testMigrationID, 1, StateDiscarded); err != nil {
+	record, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateReconciling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRollingBack)
+	if err != nil {
+		t.Fatalf("rollback transition failed: %v", err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRolledBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, record.Version, StateDiscarded); err != nil {
 		t.Fatal(err)
 	}
 	if pending, err := store.Pending(context.Background(), normalized); err != nil || pending {
@@ -516,8 +567,16 @@ func TestRedisReconcileCanObserveAuthoritativeTerminalStates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Transition(context.Background(), testMigrationID, record.Version, StateRolledBack); err != nil {
-		t.Fatalf("reconciled rollback transition failed: %v", err)
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRollingBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRolledBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, record.Version, StateDiscarded); err != nil {
+		t.Fatalf("reconciled discard transition failed: %v", err)
 	}
 }
 
@@ -531,7 +590,23 @@ func TestRedisDiscardRemovesPackageAndIdentifierIndexAtomically(t *testing.T) {
 	if err := store.Discard(context.Background(), testMigrationID, 1); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("Discard() before terminal state = %v", err)
 	}
-	record, err := store.Transition(context.Background(), testMigrationID, 1, StateDiscarded)
+	record, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateReconciling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRollingBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRolledBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateDiscarded)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +628,23 @@ func TestRedisDiscardRejectsMismatchedIdentifierIndex(t *testing.T) {
 	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t)); err != nil {
 		t.Fatal(err)
 	}
-	record, err := store.Transition(context.Background(), testMigrationID, 1, StateDiscarded)
+	record, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateReconciling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRollingBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateRolledBack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(context.Background(), testMigrationID, record.Version, StateDiscarded)
 	if err != nil {
 		t.Fatal(err)
 	}

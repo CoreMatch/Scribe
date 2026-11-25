@@ -126,15 +126,15 @@ return 0
 
 const transitionScript = `
 local transitions = {
-  STAGED_IN_REDIS = {APPLYING=true, RECONCILING=true, ROLLING_BACK=true, DISCARDED=true},
+  STAGED_IN_REDIS = {APPLYING=true, RECONCILING=true, ROLLING_BACK=true},
   APPLYING = {COMMITTED=true, RECONCILING=true, ROLLING_BACK=true},
   COMMITTED = {LOCKED=true},
   LOCKED = {},
-  RECONCILING = {APPLYING=true, COMMITTED=true, ROLLING_BACK=true, ROLLED_BACK=true, DISCARDED=true, UNKNOWN=true},
+  RECONCILING = {APPLYING=true, COMMITTED=true, ROLLING_BACK=true, UNKNOWN=true},
   ROLLING_BACK = {COMMITTED=true, ROLLED_BACK=true, RECONCILING=true, UNKNOWN=true},
   ROLLED_BACK = {DISCARDED=true},
   DISCARDED = {},
-  UNKNOWN = {RECONCILING=true, ROLLING_BACK=true, DISCARDED=true}
+  UNKNOWN = {RECONCILING=true, ROLLING_BACK=true}
 }
 local version = redis.call('HGET', KEYS[1], 'version')
 if not version then

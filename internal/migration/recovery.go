@@ -153,7 +153,15 @@ func (r *Recovery) completeCommitted(ctx context.Context, record StagedMigration
 }
 
 func (r *Recovery) finishRollback(ctx context.Context, record StagedMigration) error {
-	current, err := r.staging.Transition(ctx, record.MigrationID, record.Version, StateRolledBack)
+	current := record
+	if current.State != StateRollingBack {
+		next, err := r.staging.Transition(ctx, current.MigrationID, current.Version, StateRollingBack)
+		if err != nil {
+			return err
+		}
+		current = next
+	}
+	current, err := r.staging.Transition(ctx, current.MigrationID, current.Version, StateRolledBack)
 	if err != nil {
 		return err
 	}
