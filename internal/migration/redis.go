@@ -126,15 +126,15 @@ return 0
 
 const transitionScript = `
 local transitions = {
-  STAGED_IN_REDIS = {APPLYING=true, RECONCILING=true, ROLLING_BACK=true},
-  APPLYING = {COMMITTED=true, RECONCILING=true, ROLLING_BACK=true},
+  STAGED_IN_REDIS = {APPLYING=true, RECONCILING=true},
+  APPLYING = {COMMITTED=true, RECONCILING=true},
   COMMITTED = {LOCKED=true},
   LOCKED = {},
   RECONCILING = {APPLYING=true, COMMITTED=true, ROLLING_BACK=true, UNKNOWN=true},
   ROLLING_BACK = {COMMITTED=true, ROLLED_BACK=true, RECONCILING=true, UNKNOWN=true},
   ROLLED_BACK = {DISCARDED=true},
   DISCARDED = {},
-  UNKNOWN = {RECONCILING=true, ROLLING_BACK=true}
+  UNKNOWN = {RECONCILING=true}
 }
 local version = redis.call('HGET', KEYS[1], 'version')
 if not version then
@@ -413,6 +413,21 @@ func (s *RedisStore) Transition(ctx context.Context, migrationID string, expecte
 	if !validMigrationID(migrationID) || expectedVersion <= 0 || !validState(next) {
 		return StagedMigration{}, errors.New("invalid staged migration transition")
 	}
+	if next == StateRollingBack {
+		return StagedMigration{}, ErrInvalidTransition
+	}
+	return s.transition(ctx, migrationID, expectedVersion, next)
+}
+
+func (s *RedisStore) ConfirmRollback(ctx context.Context, migrationID string, expectedVersion int64, status MigrationStatus) (StagedMigration, error) {
+	if !validMigrationID(migrationID) || expectedVersion <= 0 || !strings.EqualFold(status.MigrationID, migrationID) ||
+		status.Status != MigrationRolledBack || status.Result != nil {
+		return StagedMigration{}, ErrInvalidResponse
+	}
+	return s.transition(ctx, migrationID, expectedVersion, StateRollingBack)
+}
+
+func (s *RedisStore) transition(ctx context.Context, migrationID string, expectedVersion int64, next State) (StagedMigration, error) {
 	result, err := s.client.Eval(ctx, transitionScript, []string{stagingKey(migrationID)}, expectedVersion, string(next), s.now().UTC().Format(time.RFC3339Nano)).Int64()
 	if err != nil {
 		return StagedMigration{}, err

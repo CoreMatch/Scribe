@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/corematch/scribe/internal/binding"
@@ -37,6 +38,13 @@ func (f *fakeRecoveryStaging) Transition(_ context.Context, migrationID string, 
 		}
 	}
 	return StagedMigration{}, ErrNotFound
+}
+
+func (f *fakeRecoveryStaging) ConfirmRollback(ctx context.Context, migrationID string, version int64, status MigrationStatus) (StagedMigration, error) {
+	if status.Status != MigrationRolledBack || !strings.EqualFold(status.MigrationID, migrationID) || status.Result != nil {
+		return StagedMigration{}, ErrInvalidResponse
+	}
+	return f.Transition(ctx, migrationID, version, StateRollingBack)
 }
 
 func (f *fakeRecoveryStaging) Discard(_ context.Context, migrationID string, _ int64) error {

@@ -18,6 +18,7 @@ type RecoveryClient interface {
 type RecoveryStaging interface {
 	List(context.Context) ([]StagedMigration, error)
 	Transition(context.Context, string, int64, State) (StagedMigration, error)
+	ConfirmRollback(context.Context, string, int64, MigrationStatus) (StagedMigration, error)
 	Discard(context.Context, string, int64) error
 }
 
@@ -102,7 +103,7 @@ func (r *Recovery) recoverActive(ctx context.Context, record StagedMigration) er
 	case MigrationCommitted:
 		return r.completeCommitted(ctx, record, status.Result)
 	case MigrationRolledBack:
-		return r.finishRollback(ctx, record)
+		return r.finishRollback(ctx, record, status)
 	}
 	rolledBack, err := r.client.Rollback(ctx, record.MigrationID)
 	if err != nil {
@@ -110,7 +111,7 @@ func (r *Recovery) recoverActive(ctx context.Context, record StagedMigration) er
 	}
 	switch rolledBack.Status {
 	case MigrationRolledBack:
-		return r.finishRollback(ctx, record)
+		return r.finishRollback(ctx, record, rolledBack)
 	case MigrationCommitted:
 		return r.completeCommitted(ctx, record, rolledBack.Result)
 	default:
@@ -152,10 +153,10 @@ func (r *Recovery) completeCommitted(ctx context.Context, record StagedMigration
 	return err
 }
 
-func (r *Recovery) finishRollback(ctx context.Context, record StagedMigration) error {
+func (r *Recovery) finishRollback(ctx context.Context, record StagedMigration, status MigrationStatus) error {
 	current := record
 	if current.State != StateRollingBack {
-		next, err := r.staging.Transition(ctx, current.MigrationID, current.Version, StateRollingBack)
+		next, err := r.staging.ConfirmRollback(ctx, current.MigrationID, current.Version, status)
 		if err != nil {
 			return err
 		}
