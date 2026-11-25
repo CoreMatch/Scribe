@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/config"
+	"github.com/corematch/scribe/internal/gateway"
 	"github.com/corematch/scribe/internal/server"
 )
 
@@ -22,7 +24,26 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	store, err := binding.OpenSQLite(cfg.SQLitePath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Error("binding store close failed", "error", err)
+		}
+	}()
 
-	mux := httpMux()
-	return server.New(cfg.ListenAddr, mux, cfg.ShutdownTimeout, log).Run(ctx)
+	gateway, err := gateway.New(gateway.Options{
+		PublicBaseURL:   cfg.PublicBaseURL,
+		LegacyBaseURL:   cfg.LegacyBaseURL,
+		ArmorialBaseURL: cfg.ArmorialBaseURL,
+		RequestTimeout:  cfg.RequestTimeout,
+		MaxRequestBody:  cfg.MaxRequestBody,
+		Circuit:         circuitbreakerSettings(cfg),
+	}, store, log)
+	if err != nil {
+		return err
+	}
+	return server.New(cfg.ListenAddr, httpMux(cfg, gateway), cfg.ShutdownTimeout, log).Run(ctx)
 }
