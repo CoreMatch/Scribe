@@ -55,8 +55,11 @@ func run(ctx context.Context, log *slog.Logger) error {
 		}
 	}()
 
-	migrator, migrationPending, err := newMigrator(cfg, redisClient, log)
+	migrator, migrationPending, recovery, err := newMigrator(cfg, redisClient, store, log)
 	if err != nil {
+		return err
+	}
+	if err := recovery.Run(ctx); err != nil {
 		return err
 	}
 	gateway, err := gateway.New(gateway.Options{
@@ -94,35 +97,39 @@ func openRedis(rawURL string) (*redis.Client, error) {
 	return redis.NewClient(options), nil
 }
 
-func newMigrator(cfg config.Config, redisClient redis.UniversalClient, log *slog.Logger) (migration.Runner, migration.PendingChecker, error) {
+func newMigrator(cfg config.Config, redisClient redis.UniversalClient, store *binding.SQLiteStore, log *slog.Logger) (migration.Runner, migration.PendingChecker, *migration.Recovery, error) {
 	profiles, err := profile.New(cfg.LegacyBaseURL, profile.Options{Timeout: cfg.RequestTimeout})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	downloader, err := texture.New(texture.Options{Timeout: cfg.RequestTimeout})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	snapshotter, err := migration.New(profiles, downloader, migration.Options{})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	staging, err := migration.NewRedisStore(redisClient, migration.RedisOptions{
 		TTL:             cfg.MigrationTTL,
 		MaxPackageBytes: cfg.MigrationMaxPackageBytes,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	committer, err := migration.NewClient(cfg.ArmorialBaseURL, cfg.MigrationServiceToken, migration.ClientOptions{
 		Timeout: cfg.MigrationTimeout,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	service, err := migration.NewService(snapshotter, staging, committer, log)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return service, staging, nil
+	recovery, err := migration.NewRecovery(staging, committer, store, log)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return service, staging, recovery, nil
 }

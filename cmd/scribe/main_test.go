@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"io"
 	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/config"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestOpenRedisRequiresVerifiedTLS(t *testing.T) {
@@ -35,24 +40,30 @@ func TestOpenRedisRequiresVerifiedTLS(t *testing.T) {
 	}
 }
 
-func TestNewMigratorConstructsProductionDependencies(t *testing.T) {
+func TestNewMigratorConstructsProductionDependenciesAndRecovery(t *testing.T) {
 	cfg := config.Config{
 		LegacyBaseURL:            "https://legacy.internal",
 		ArmorialBaseURL:          "https://armorial.internal",
-		RedisURL:                 "rediss://redis.internal:6379/0",
 		MigrationServiceToken:    "service-token",
 		MigrationTTL:             24 * time.Hour,
 		MigrationMaxPackageBytes: 16 << 20,
 		MigrationTimeout:         60 * time.Second,
 		RequestTimeout:           15 * time.Second,
 	}
-	redisClient, err := openRedis(cfg.RedisURL)
+	redisServer := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	defer redisClient.Close()
+	store, err := binding.OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer redisClient.Close()
-	migrator, pending, err := newMigrator(cfg, redisClient, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil || migrator == nil || pending == nil {
-		t.Fatalf("newMigrator() = %v, %v, %v", migrator, pending, err)
+	defer store.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	migrator, pending, recovery, err := newMigrator(cfg, redisClient, store, log)
+	if err != nil || migrator == nil || pending == nil || recovery == nil {
+		t.Fatalf("newMigrator() = %v, %v, %v, %v", migrator, pending, recovery, err)
+	}
+	if err := recovery.Run(context.Background()); err != nil {
+		t.Fatalf("recovery.Run() error = %v", err)
 	}
 }
