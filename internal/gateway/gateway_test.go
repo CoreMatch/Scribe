@@ -485,6 +485,24 @@ func TestRefreshAndValidateUseTokenBinding(t *testing.T) {
 	}
 }
 
+func TestInvalidateUsesTokenBinding(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	env := newTestGateway(t, upstream.URL, upstream.URL, race.IntentUnspecified)
+	if _, err := env.store.BindIfAbsent(context.Background(), "Player", binding.Armorial, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := env.store.BindToken(context.Background(), "bound-token", "Player", binding.Armorial); err != nil {
+		t.Fatal(err)
+	}
+	response := env.perform(http.MethodPost, "/authserver/invalidate", `{"accessToken":"bound-token"}`)
+	if response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+		t.Fatalf("invalidate = %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestUnknownTokenIsForcedToReauthenticate(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -493,10 +511,20 @@ func TestUnknownTokenIsForcedToReauthenticate(t *testing.T) {
 	}))
 	defer upstream.Close()
 	env := newTestGateway(t, upstream.URL, upstream.URL, race.IntentUnspecified)
-	for _, path := range []string{"/authserver/validate", "/authserver/refresh", "/authserver/invalidate"} {
-		response := env.perform(http.MethodPost, path, `{"accessToken":"unknown"}`)
-		if response.Code != http.StatusForbidden {
-			t.Fatalf("%s status = %d, want 403", path, response.Code)
+	for _, test := range []struct {
+		path   string
+		status int
+	}{
+		{path: "/authserver/validate", status: http.StatusForbidden},
+		{path: "/authserver/refresh", status: http.StatusForbidden},
+		{path: "/authserver/invalidate", status: http.StatusNoContent},
+	} {
+		response := env.perform(http.MethodPost, test.path, `{"accessToken":"unknown"}`)
+		if response.Code != test.status {
+			t.Fatalf("%s status = %d, want %d", test.path, response.Code, test.status)
+		}
+		if test.status == http.StatusForbidden && !strings.Contains(response.Body.String(), "ForbiddenOperationException") {
+			t.Fatalf("%s response = %s", test.path, response.Body.String())
 		}
 	}
 	if calls.Load() != 0 {

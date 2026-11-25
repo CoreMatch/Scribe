@@ -177,6 +177,9 @@ func (g *Gateway) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	bound, err := g.bindingByToken(w, r, request.AccessToken)
 	if err != nil {
+		if errors.Is(err, binding.ErrNotFound) {
+			protocol.WriteInvalidToken(w)
+		}
 		return
 	}
 	result := g.execute(r.Context(), bound.Winner, r, body)
@@ -198,14 +201,14 @@ func (g *Gateway) refresh(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) validate(w http.ResponseWriter, r *http.Request) {
-	g.tokenOperation(w, r)
+	g.tokenOperation(w, r, http.StatusForbidden)
 }
 
 func (g *Gateway) invalidate(w http.ResponseWriter, r *http.Request) {
-	g.tokenOperation(w, r)
+	g.tokenOperation(w, r, http.StatusNoContent)
 }
 
-func (g *Gateway) tokenOperation(w http.ResponseWriter, r *http.Request) {
+func (g *Gateway) tokenOperation(w http.ResponseWriter, r *http.Request, unknownTokenStatus int) {
 	body, ok := g.readRequestBody(w, r)
 	if !ok {
 		return
@@ -217,6 +220,13 @@ func (g *Gateway) tokenOperation(w http.ResponseWriter, r *http.Request) {
 	}
 	bound, err := g.bindingByToken(w, r, request.AccessToken)
 	if err != nil {
+		if errors.Is(err, binding.ErrNotFound) {
+			if unknownTokenStatus == http.StatusNoContent {
+				w.WriteHeader(http.StatusNoContent)
+			} else {
+				protocol.WriteInvalidToken(w)
+			}
+		}
 		return
 	}
 	g.writeResult(w, g.execute(r.Context(), bound.Winner, r, body))
@@ -263,16 +273,11 @@ func (g *Gateway) signout(w http.ResponseWriter, r *http.Request) {
 
 func (g *Gateway) bindingByToken(w http.ResponseWriter, r *http.Request, accessToken string) (binding.Binding, error) {
 	bound, err := g.store.GetBindingByToken(r.Context(), accessToken)
-	if errors.Is(err, binding.ErrNotFound) {
-		protocol.WriteInvalidToken(w)
-		return binding.Binding{}, err
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, binding.ErrNotFound) {
 		g.log.Error("token binding lookup failed")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Service temporarily unavailable.")
-		return binding.Binding{}, err
 	}
-	return bound, nil
+	return bound, err
 }
 
 func (g *Gateway) readRequestBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
