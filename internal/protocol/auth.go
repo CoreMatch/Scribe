@@ -19,6 +19,16 @@ type AuthenticateRequest struct {
 	RequestUser *bool  `json:"requestUser,omitempty"`
 }
 
+type TokenRequest struct {
+	AccessToken string `json:"accessToken"`
+	ClientToken string `json:"clientToken,omitempty"`
+}
+
+type SignoutRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 type AuthenticateResponse struct {
 	AccessToken       string    `json:"accessToken"`
 	ClientToken       string    `json:"clientToken"`
@@ -53,6 +63,28 @@ func DecodeAuthenticateRequest(data []byte) (AuthenticateRequest, error) {
 	}
 	if !utf8.ValidString(request.Username) || !utf8.ValidString(request.Password) {
 		return AuthenticateRequest{}, errors.New("credentials must be valid UTF-8")
+	}
+	return request, nil
+}
+
+func DecodeTokenRequest(data []byte) (TokenRequest, error) {
+	var request TokenRequest
+	if err := json.Unmarshal(data, &request); err != nil {
+		return TokenRequest{}, errors.New("invalid token request")
+	}
+	if request.AccessToken == "" {
+		return TokenRequest{}, errors.New("accessToken is required")
+	}
+	return request, nil
+}
+
+func DecodeSignoutRequest(data []byte) (SignoutRequest, error) {
+	var request SignoutRequest
+	if err := json.Unmarshal(data, &request); err != nil {
+		return SignoutRequest{}, errors.New("invalid signout request")
+	}
+	if strings.TrimSpace(request.Username) == "" || request.Password == "" {
+		return SignoutRequest{}, errors.New("username and password are required")
 	}
 	return request, nil
 }

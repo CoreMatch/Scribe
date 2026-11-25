@@ -46,6 +46,30 @@ func TestDecodeAuthenticateResponseRejectsMalformedSuccess(t *testing.T) {
 	}
 }
 
+func TestDecodeTokenRequest(t *testing.T) {
+	request, err := DecodeTokenRequest([]byte(`{"accessToken":"access","clientToken":"client"}`))
+	if err != nil || request.AccessToken != "access" || request.ClientToken != "client" {
+		t.Fatalf("DecodeTokenRequest() = %+v, %v", request, err)
+	}
+	for _, body := range []string{`{}`, `{"clientToken":"client"}`, `not-json`} {
+		if _, err := DecodeTokenRequest([]byte(body)); err == nil {
+			t.Fatalf("DecodeTokenRequest(%q) unexpectedly succeeded", body)
+		}
+	}
+}
+
+func TestDecodeSignoutRequest(t *testing.T) {
+	request, err := DecodeSignoutRequest([]byte(`{"username":"Player","password":"secret"}`))
+	if err != nil || request.Username != "Player" || request.Password != "secret" {
+		t.Fatalf("DecodeSignoutRequest() = %+v, %v", request, err)
+	}
+	for _, body := range []string{`{}`, `{"username":"Player"}`, `not-json`} {
+		if _, err := DecodeSignoutRequest([]byte(body)); err == nil {
+			t.Fatalf("DecodeSignoutRequest(%q) unexpectedly succeeded", body)
+		}
+	}
+}
+
 func TestNormalizeIdentifier(t *testing.T) {
 	tests := []struct {
 		input string
