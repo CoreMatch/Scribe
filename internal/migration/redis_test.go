@@ -122,6 +122,82 @@ func TestRedisStageWithoutAssets(t *testing.T) {
 	}
 }
 
+func TestRedisStageReusesMigrationByIdentifier(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	identifierHash := strings.Repeat("ab", 32)
+	secondID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	first, created, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t))
+	if err != nil || !created {
+		t.Fatalf("Stage() = %+v, %v, %v", first, created, err)
+	}
+	second, created, err := store.Stage(context.Background(), secondID, identifierHash, validDigestSnapshot(t))
+	if err != nil || created || !reflect.DeepEqual(first, second) {
+		t.Fatalf("retry Stage() = %+v, %v, %v", second, created, err)
+	}
+	indexed, err := client.Get(context.Background(), identifierIndexKey(identifierHash)).Result()
+	if err != nil || indexed != testMigrationID {
+		t.Fatalf("identifier index = %q, %v", indexed, err)
+	}
+	if ttl := server.TTL(identifierIndexKey(identifierHash)); ttl != 24*time.Hour {
+		t.Fatalf("index TTL = %v", ttl)
+	}
+	conflicting := validDigestSnapshot(t)
+	conflicting.Profile.Name = "DifferentPlayer"
+	conflicting.Textures.ProfileName = conflicting.Profile.Name
+	if _, _, err := store.Stage(context.Background(), secondID, identifierHash, conflicting); !errors.Is(err, ErrConflict) {
+		t.Fatalf("changed retry Stage() error = %v", err)
+	}
+}
+
+func TestRedisStageConcurrentIdentifiersReuseOneMigration(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	identifierHash := strings.Repeat("ab", 32)
+	secondID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	const workers = 10
+	type stageResult struct {
+		record  StagedMigration
+		created bool
+		err     error
+	}
+	results := make(chan stageResult, workers)
+	var wait sync.WaitGroup
+	for index := range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			id := testMigrationID
+			if index%2 == 1 {
+				id = secondID
+			}
+			record, created, err := store.Stage(context.Background(), id, identifierHash, validDigestSnapshot(t))
+			results <- stageResult{record: record, created: created, err: err}
+		}()
+	}
+	wait.Wait()
+	close(results)
+	migrationID := ""
+	creators := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("Stage() error = %v", result.err)
+		}
+		if result.created {
+			creators++
+		}
+		if migrationID == "" {
+			migrationID = result.record.MigrationID
+		}
+		if result.record.MigrationID != migrationID {
+			t.Fatalf("concurrent Stage() IDs = %q and %q", migrationID, result.record.MigrationID)
+		}
+	}
+	if creators != 1 {
+		t.Fatalf("creators = %d", creators)
+	}
+}
+
 func TestRedisStageAllowsOneConcurrentCreator(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := testRedisStore(t, server, RedisOptions{})

@@ -86,11 +86,26 @@ type stagedAssetPayload struct {
 }
 
 const stageScript = `
+local ttl = ARGV[7]
+local indexed = redis.call('GET', KEYS[2])
+if indexed then
+  redis.call('PEXPIRE', KEYS[1], ttl)
+  redis.call('PEXPIRE', KEYS[2], ttl)
+  if indexed == ARGV[8] then
+    local payload = redis.call('HGET', KEYS[1], 'payload')
+    if payload then
+      return payload
+    end
+    return 'MISSING:' .. indexed
+  end
+  return 'INDEX:' .. indexed
+end
 local existing = redis.call('HGET', KEYS[1], 'payload')
 if existing then
-  redis.call('PEXPIRE', KEYS[1], ARGV[7])
+  redis.call('PEXPIRE', KEYS[1], ttl)
   return existing
 end
+redis.call('SET', KEYS[2], ARGV[8], 'PX', ttl)
 redis.call('HSET', KEYS[1],
   'payload', ARGV[1],
   'state', ARGV[2],
@@ -99,7 +114,7 @@ redis.call('HSET', KEYS[1],
   'updated_at', ARGV[4],
   'skin', ARGV[5],
   'cape', ARGV[6])
-redis.call('PEXPIRE', KEYS[1], ARGV[7])
+redis.call('PEXPIRE', KEYS[1], ttl)
 return 0
 `
 
@@ -184,11 +199,28 @@ func (s *RedisStore) Stage(ctx context.Context, migrationID, identifierHash stri
 		return StagedMigration{}, false, ErrPackageTooLarge
 	}
 	now := s.now().UTC()
-	result, err := s.client.Eval(ctx, stageScript, []string{stagingKey(migrationID)}, encoded, string(StateStagedInRedis), 1, now.Format(time.RFC3339Nano), string(skinBytes), string(capeBytes), s.ttl.Milliseconds()).Result()
+	result, err := s.client.Eval(ctx, stageScript, []string{stagingKey(migrationID), identifierIndexKey(payload.IdentifierHash)}, encoded, string(StateStagedInRedis), 1, now.Format(time.RFC3339Nano), string(skinBytes), string(capeBytes), s.ttl.Milliseconds(), migrationID).Result()
 	if err != nil {
 		return StagedMigration{}, false, err
 	}
 	if existing, ok := result.(string); ok {
+		if strings.HasPrefix(existing, "MISSING:") {
+			return StagedMigration{}, false, ErrCorruptStaging
+		}
+		if strings.HasPrefix(existing, "INDEX:") {
+			existingID := strings.TrimPrefix(existing, "INDEX:")
+			if !validMigrationID(existingID) {
+				return StagedMigration{}, false, ErrCorruptStaging
+			}
+			record, err := s.Load(ctx, existingID)
+			if err != nil {
+				return StagedMigration{}, false, err
+			}
+			if !strings.EqualFold(record.CommitDigest, commitDigest) {
+				return StagedMigration{}, false, ErrConflict
+			}
+			return record, false, nil
+		}
 		var previous stagedPayload
 		if err := json.Unmarshal([]byte(existing), &previous); err != nil {
 			return StagedMigration{}, false, ErrCorruptStaging
@@ -377,6 +409,10 @@ func cloneMetadata(metadata map[string]string) map[string]string {
 
 func stagingKey(migrationID string) string {
 	return "scribe:migration:" + migrationID
+}
+
+func identifierIndexKey(identifierHash string) string {
+	return "scribe:migration:identifier:" + identifierHash
 }
 
 func validMigrationID(id string) bool {
