@@ -20,6 +20,7 @@ import (
 const (
 	TexturesProperty = "textures"
 	maxTexturesSize  = 64 << 10
+	maxProfileSize   = 1 << 20
 )
 
 type ProfileProperty struct {
@@ -74,6 +75,20 @@ func ParsePrivateKey(data []byte) (*rsa.PrivateKey, error) {
 		return nil, errors.New("invalid RSA private key")
 	}
 	return privateKey, nil
+}
+
+func DecodeSignedProfile(data []byte) (SignedProfile, error) {
+	if len(data) == 0 || len(data) > maxProfileSize {
+		return SignedProfile{}, errors.New("invalid signed profile size")
+	}
+	var profile SignedProfile
+	if err := json.Unmarshal(data, &profile); err != nil {
+		return SignedProfile{}, errors.New("invalid signed profile JSON")
+	}
+	if err := validateProfile(profile); err != nil {
+		return SignedProfile{}, err
+	}
+	return profile, nil
 }
 
 func VerifiedTextures(profile SignedProfile, publicKey *rsa.PublicKey) (Textures, bool, error) {

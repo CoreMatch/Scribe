@@ -17,6 +17,27 @@ import (
 
 const testProfileID = "12345678123412341234567812345678"
 
+func TestDecodeSignedProfile(t *testing.T) {
+	profile, err := DecodeSignedProfile([]byte(`{"id":"12345678123412341234567812345678","name":"LegacyPlayer","properties":[]}`))
+	if err != nil || profile.ID != testProfileID || profile.Name != "LegacyPlayer" {
+		t.Fatalf("DecodeSignedProfile() = %+v, %v", profile, err)
+	}
+	for _, body := range []string{
+		``,
+		`not-json`,
+		`{}`,
+		`{"id":"invalid","name":"LegacyPlayer"}`,
+		`{"id":"12345678123412341234567812345678","name":" "}`,
+	} {
+		if _, err := DecodeSignedProfile([]byte(body)); err == nil {
+			t.Fatalf("DecodeSignedProfile(%q) unexpectedly succeeded", body)
+		}
+	}
+	if _, err := DecodeSignedProfile(make([]byte, maxProfileSize+1)); err == nil {
+		t.Fatal("DecodeSignedProfile() accepted an oversized profile")
+	}
+}
+
 func TestRewriteAndVerifyTextures(t *testing.T) {
 	privateKey := testRSAKey(t, 2048)
 	profile := SignedProfile{
