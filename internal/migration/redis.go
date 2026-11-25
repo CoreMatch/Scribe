@@ -192,6 +192,9 @@ func (s *RedisStore) Pending(ctx context.Context, identifier string) (bool, erro
 	if record.IdentifierHash != identifierHash {
 		return false, ErrCorruptStaging
 	}
+	if record.State == StateRolledBack || record.State == StateDiscarded {
+		return false, nil
+	}
 	return true, nil
 }
 
@@ -280,6 +283,29 @@ func (s *RedisStore) Stage(ctx context.Context, migrationID, identifierHash stri
 	}
 	return StagedMigration{}, false, ErrCorruptStaging
 }
+
+const discardScript = `
+local state = redis.call('HGET', KEYS[1], 'state')
+local version = redis.call('HGET', KEYS[1], 'version')
+if not state or not version then
+  return -1
+end
+if state ~= 'DISCARDED' then
+  return -2
+end
+if tonumber(version) ~= tonumber(ARGV[1]) then
+  return 0
+end
+local indexed = redis.call('GET', KEYS[2])
+if indexed and indexed ~= ARGV[2] then
+  return -3
+end
+redis.call('DEL', KEYS[1])
+if indexed == ARGV[2] then
+  redis.call('DEL', KEYS[2])
+end
+return 1
+`
 
 func (s *RedisStore) List(ctx context.Context) ([]StagedMigration, error) {
 	var cursor uint64
@@ -399,6 +425,37 @@ func (s *RedisStore) Transition(ctx context.Context, migrationID string, expecte
 		return s.Load(ctx, migrationID)
 	default:
 		return StagedMigration{}, ErrCorruptStaging
+	}
+}
+
+func (s *RedisStore) Discard(ctx context.Context, migrationID string, expectedVersion int64) error {
+	if !validMigrationID(migrationID) || expectedVersion <= 0 {
+		return errors.New("invalid staged migration discard")
+	}
+	record, err := s.Load(ctx, migrationID)
+	if err != nil {
+		return err
+	}
+	if record.State != StateDiscarded {
+		return ErrInvalidTransition
+	}
+	result, err := s.client.Eval(ctx, discardScript, []string{stagingKey(migrationID), identifierIndexKey(record.IdentifierHash)}, expectedVersion, migrationID).Int64()
+	if err != nil {
+		return err
+	}
+	switch result {
+	case -1:
+		return ErrNotFound
+	case 0:
+		return ErrVersionConflict
+	case -2:
+		return ErrInvalidTransition
+	case -3:
+		return ErrCorruptStaging
+	case 1:
+		return nil
+	default:
+		return ErrCorruptStaging
 	}
 }
 

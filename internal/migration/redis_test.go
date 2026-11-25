@@ -389,6 +389,12 @@ func TestRedisPendingUsesNormalizedIdentifierIndex(t *testing.T) {
 	if pending, err := store.Pending(context.Background(), "OtherPlayer"); err != nil || pending {
 		t.Fatalf("Pending() for another identifier = %v, %v", pending, err)
 	}
+	if _, err := store.Transition(context.Background(), testMigrationID, 1, StateDiscarded); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := store.Pending(context.Background(), normalized); err != nil || pending {
+		t.Fatalf("Pending() after discard = %v, %v", pending, err)
+	}
 	server.FastForward(25 * time.Hour)
 	if pending, err := store.Pending(context.Background(), normalized); err != nil || pending {
 		t.Fatalf("Pending() after expiry = %v, %v", pending, err)
@@ -468,6 +474,54 @@ func TestRedisReconcileCanObserveAuthoritativeTerminalStates(t *testing.T) {
 	}
 	if _, err := store.Transition(context.Background(), testMigrationID, record.Version, StateRolledBack); err != nil {
 		t.Fatalf("reconciled rollback transition failed: %v", err)
+	}
+}
+
+func TestRedisDiscardRemovesPackageAndIdentifierIndexAtomically(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	identifierHash := strings.Repeat("ab", 32)
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Discard(context.Background(), testMigrationID, 1); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("Discard() before terminal state = %v", err)
+	}
+	record, err := store.Transition(context.Background(), testMigrationID, 1, StateDiscarded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Discard(context.Background(), testMigrationID, record.Version-1); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("Discard() with stale version = %v", err)
+	}
+	if err := store.Discard(context.Background(), testMigrationID, record.Version); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := client.Exists(context.Background(), stagingKey(testMigrationID), identifierIndexKey(identifierHash)).Result(); err != nil || count != 0 {
+		t.Fatalf("discarded keys remain: count=%d, err=%v", count, err)
+	}
+}
+
+func TestRedisDiscardRejectsMismatchedIdentifierIndex(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	identifierHash := strings.Repeat("ab", 32)
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Transition(context.Background(), testMigrationID, 1, StateDiscarded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+	if err := client.Set(context.Background(), identifierIndexKey(identifierHash), otherID, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Discard(context.Background(), testMigrationID, record.Version); !errors.Is(err, ErrCorruptStaging) {
+		t.Fatalf("Discard() with mismatched index = %v", err)
+	}
+	if exists, err := client.Exists(context.Background(), stagingKey(testMigrationID)).Result(); err != nil || exists != 1 {
+		t.Fatalf("package was deleted despite corrupt index: exists=%d, err=%v", exists, err)
 	}
 }
 
