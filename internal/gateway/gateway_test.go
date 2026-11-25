@@ -362,6 +362,32 @@ func TestUnknownTargetStateBlocksWithoutBinding(t *testing.T) {
 	}
 }
 
+func TestMalformedTargetProfilesBlockWithoutBinding(t *testing.T) {
+	for _, body := range []string{
+		`{"accessToken":"target-token","clientToken":"client","selectedProfile":{"id":"not-a-uuid","name":"Player"}}`,
+		`{"accessToken":"target-token","clientToken":"client","selectedProfile":{"id":"12345678123412341234567812345678","name":"Player"},"availableProfiles":[{"id":"bad","name":"Other"}]}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, authenticationBody("legacy-token", "LegacyPlayer", true))
+			}))
+			defer legacy.Close()
+			armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, body)
+			}))
+			defer armorial.Close()
+			env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+			response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
+			if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "target-token") {
+				t.Fatalf("malformed target response = %d %s", response.Code, response.Body.String())
+			}
+			if _, err := env.store.GetBinding(context.Background(), "Player"); !errors.Is(err, binding.ErrNotFound) {
+				t.Fatalf("malformed target response created a binding: %v", err)
+			}
+		})
+	}
+}
+
 func TestTargetTimeoutBlocksWithoutBinding(t *testing.T) {
 	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, authenticationBody("legacy-token", "LegacyPlayer", true))

@@ -98,8 +98,13 @@ func DecodeAuthenticateResponse(data []byte) (AuthenticateResponse, error) {
 		return AuthenticateResponse{}, errors.New("authenticate response is missing tokens")
 	}
 	if response.SelectedProfile != nil {
-		if response.SelectedProfile.ID == "" || response.SelectedProfile.Name == "" {
+		if !ValidProfileID(response.SelectedProfile.ID) || !validProfileName(response.SelectedProfile.Name) {
 			return AuthenticateResponse{}, errors.New("selectedProfile is incomplete")
+		}
+	}
+	for _, profile := range response.AvailableProfiles {
+		if !ValidProfileID(profile.ID) || !validProfileName(profile.Name) {
+			return AuthenticateResponse{}, errors.New("availableProfiles contains an invalid profile")
 		}
 	}
 	return response, nil

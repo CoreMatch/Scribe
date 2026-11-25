@@ -128,7 +128,7 @@ func TestRunBlocksOnCanceledContext(t *testing.T) {
 func success(withProfile bool) Result {
 	body := `{"accessToken":"access","clientToken":"client"}`
 	if withProfile {
-		body = `{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"uuid","name":"Player"}}`
+		body = `{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"12345678123412341234567812345678","name":"Player"}}`
 	}
 	return Result{StatusCode: http.StatusOK, Body: []byte(body)}
 }

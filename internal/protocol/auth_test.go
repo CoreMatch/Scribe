@@ -24,11 +24,11 @@ func TestDecodeAuthenticateRequestRejectsMissingCredentials(t *testing.T) {
 }
 
 func TestDecodeAuthenticateResponse(t *testing.T) {
-	response, err := DecodeAuthenticateResponse([]byte(`{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"uuid","name":"Player"}}`))
+	response, err := DecodeAuthenticateResponse([]byte(`{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"12345678123412341234567812345678","name":"Player"},"availableProfiles":[{"id":"87654321876543218765432187654321","name":"Other"}]}`))
 	if err != nil {
 		t.Fatalf("DecodeAuthenticateResponse() error = %v", err)
 	}
-	if response.SelectedProfile == nil || response.SelectedProfile.ID != "uuid" {
+	if response.SelectedProfile == nil || response.SelectedProfile.ID != "12345678123412341234567812345678" || len(response.AvailableProfiles) != 1 {
 		t.Fatalf("DecodeAuthenticateResponse() = %+v", response)
 	}
 }
@@ -37,7 +37,10 @@ func TestDecodeAuthenticateResponseRejectsMalformedSuccess(t *testing.T) {
 	for _, body := range []string{
 		`{}`,
 		`{"accessToken":"access"}`,
-		`{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"uuid"}}`,
+		`{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"12345678123412341234567812345678"}}`,
+		`{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"1234567812341234-1234-1234-1234-123456789012","name":"Player"}}`,
+		`{"accessToken":"access","clientToken":"client","availableProfiles":[{"id":"not-a-uuid","name":"Player"}]}`,
+		`{"accessToken":"access","clientToken":"client","availableProfiles":[{"id":"12345678123412341234567812345678","name":" "}]}`,
 		`not-json`,
 	} {
 		if _, err := DecodeAuthenticateResponse([]byte(body)); err == nil {
