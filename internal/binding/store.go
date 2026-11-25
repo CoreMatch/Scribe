@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -38,6 +39,7 @@ type Binding struct {
 type Store interface {
 	GetBinding(ctx context.Context, identifier string) (Binding, error)
 	BindIfAbsent(ctx context.Context, identifier string, winner Winner, migrationID string) (Binding, error)
+	BindIfAbsentByHash(ctx context.Context, identifierHash string, winner Winner, migrationID string) (Binding, error)
 	GetBindingByToken(ctx context.Context, accessToken string) (Binding, error)
 	BindToken(ctx context.Context, accessToken, identifier string, winner Winner) error
 	BindTokenByHash(ctx context.Context, accessToken, identifierHash string, winner Winner) error
@@ -129,6 +131,14 @@ func (s *SQLiteStore) GetBinding(ctx context.Context, identifier string) (Bindin
 
 func (s *SQLiteStore) BindIfAbsent(ctx context.Context, identifier string, winner Winner, migrationID string) (Binding, error) {
 	hash, err := digest(identifier)
+	if err != nil {
+		return Binding{}, err
+	}
+	return s.BindIfAbsentByHash(ctx, hash, winner, migrationID)
+}
+
+func (s *SQLiteStore) BindIfAbsentByHash(ctx context.Context, identifierHash string, winner Winner, migrationID string) (Binding, error) {
+	hash, err := canonicalIdentifierHash(identifierHash)
 	if err != nil {
 		return Binding{}, err
 	}
@@ -264,6 +274,17 @@ func scanBinding(row rowScanner) (Binding, error) {
 	}
 	binding.CreatedAt = time.Unix(createdAt, 0).UTC()
 	return binding, nil
+}
+
+func canonicalIdentifierHash(value string) (string, error) {
+	if len(value) != 64 {
+		return "", errors.New("identifier hash must be a SHA-256 digest")
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", errors.New("identifier hash must be a SHA-256 digest")
+	}
+	return strings.ToLower(value), nil
 }
 
 func digest(value string) (string, error) {

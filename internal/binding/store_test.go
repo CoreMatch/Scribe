@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -122,6 +123,44 @@ func TestSQLiteTokenBindingByHash(t *testing.T) {
 	got, err := store.GetBindingByToken(ctx, "refreshed-token")
 	if err != nil || got.IdentifierHash != bound.IdentifierHash || got.Winner != Armorial {
 		t.Fatalf("GetBindingByToken() = %+v, %v", got, err)
+	}
+}
+
+func TestSQLiteBindingByHashSupportsCredentialFreeRecovery(t *testing.T) {
+	store := openTestStore(t)
+	ctx := context.Background()
+	identifierSum := sha256.Sum256([]byte("Player"))
+	identifierHash := hex.EncodeToString(identifierSum[:])
+	first, err := store.BindIfAbsentByHash(ctx, strings.ToUpper(identifierHash), Armorial, "migration-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.BindIfAbsentByHash(ctx, identifierHash, Armorial, "migration-1")
+	if err != nil || !first.CreatedAt.Equal(second.CreatedAt) {
+		t.Fatalf("idempotent hash binding = %+v, %v", second, err)
+	}
+	if _, err := store.BindIfAbsentByHash(ctx, identifierHash, Legacy, "other-migration"); !errors.Is(err, ErrBindingConflict) {
+		t.Fatalf("hash winner switch error = %v", err)
+	}
+	if err := store.BindTokenByHash(ctx, "recovered-token", identifierHash, Armorial); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := store.GetBindingByToken(ctx, "recovered-token")
+	if err != nil || bound.MigrationID != "migration-1" || bound.Winner != Armorial {
+		t.Fatalf("recovered token binding = %+v, %v", bound, err)
+	}
+	plain, err := store.GetBinding(ctx, "Player")
+	if err != nil || plain.IdentifierHash != identifierHash {
+		t.Fatalf("plaintext lookup after recovery = %+v, %v", plain, err)
+	}
+}
+
+func TestSQLiteRejectsInvalidIdentifierHashes(t *testing.T) {
+	store := openTestStore(t)
+	for _, hash := range []string{"", "short", strings.Repeat("z", 64)} {
+		if _, err := store.BindIfAbsentByHash(context.Background(), hash, Armorial, "migration"); err == nil {
+			t.Fatalf("BindIfAbsentByHash(%q) unexpectedly succeeded", hash)
+		}
 	}
 }
 
