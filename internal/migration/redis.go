@@ -271,22 +271,7 @@ func (s *RedisStore) Load(ctx context.Context, migrationID string) (StagedMigrat
 	if err != nil {
 		return StagedMigration{}, err
 	}
-	snapshot := Snapshot{
-		Profile: protocol.SignedProfile{ID: record.Profile.ID, Name: record.Profile.Name},
-		Textures: protocol.Textures{
-			ProfileID:   record.Profile.ID,
-			ProfileName: record.Profile.Name,
-			Textures:    map[string]protocol.Texture{},
-		},
-		Assets: map[string]assets.Asset{},
-	}
-	for name, asset := range map[string]*StagedAsset{"SKIN": record.Skin, "CAPE": record.Cape} {
-		if asset == nil {
-			continue
-		}
-		snapshot.Textures.Textures[name] = protocol.Texture{Metadata: asset.Metadata}
-		snapshot.Assets[name] = asset.Asset
-	}
+	snapshot := record.snapshot()
 	digest, err := CommitDigest(snapshot, payload.IdentifierHash)
 	if err != nil || digest != payload.CommitDigest {
 		return StagedMigration{}, ErrCorruptStaging
@@ -314,6 +299,26 @@ func (s *RedisStore) Transition(ctx context.Context, migrationID string, expecte
 	default:
 		return StagedMigration{}, ErrCorruptStaging
 	}
+}
+
+func (r StagedMigration) snapshot() Snapshot {
+	snapshot := Snapshot{
+		Profile: protocol.SignedProfile{ID: r.Profile.ID, Name: r.Profile.Name},
+		Textures: protocol.Textures{
+			ProfileID:   r.Profile.ID,
+			ProfileName: r.Profile.Name,
+			Textures:    map[string]protocol.Texture{},
+		},
+		Assets: map[string]assets.Asset{},
+	}
+	for name, asset := range map[string]*StagedAsset{"SKIN": r.Skin, "CAPE": r.Cape} {
+		if asset == nil {
+			continue
+		}
+		snapshot.Textures.Textures[name] = protocol.Texture{Metadata: asset.Metadata}
+		snapshot.Assets[name] = asset.Asset
+	}
+	return snapshot
 }
 
 func stageAsset(snapshot Snapshot, name string) (*stagedAssetPayload, []byte, error) {
