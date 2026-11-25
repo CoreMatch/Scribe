@@ -19,14 +19,11 @@ type Settings struct {
 
 var errUpstreamUnavailable = errors.New("upstream unavailable")
 
-func Wrap(fn race.AuthenticationFunc, settings Settings) (*Breaker, error) {
-	if fn == nil {
-		return nil, errors.New("authentication function is required")
-	}
+func New(settings Settings) (*Breaker, error) {
 	if settings.FailureThreshold == 0 || settings.OpenTimeout <= 0 || settings.HalfOpenMaxRequests == 0 {
 		return nil, errors.New("circuit breaker settings must be positive")
 	}
-	breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
+	return &Breaker{breaker: gobreaker.NewCircuitBreaker(gobreaker.Settings{
 		Name:        "yggdrasil-authentication",
 		MaxRequests: settings.HalfOpenMaxRequests,
 		Interval:    0,
@@ -34,43 +31,40 @@ func Wrap(fn race.AuthenticationFunc, settings Settings) (*Breaker, error) {
 		ReadyToTrip: func(counts gobreaker.Counts) bool {
 			return counts.ConsecutiveFailures >= settings.FailureThreshold
 		},
-	})
-	wrapped := &Breaker{breaker: breaker}
-	wrapped.fn = func(ctx context.Context) race.Result {
-		value, err := breaker.Execute(func() (any, error) {
-			result := fn(ctx)
-			if result.Err != nil {
-				return result, errUpstreamUnavailable
-			}
-			if result.StatusCode == 0 || result.StatusCode == http.StatusTooManyRequests || result.StatusCode >= http.StatusInternalServerError {
-				return result, errUpstreamUnavailable
-			}
-			if result.StatusCode == http.StatusOK {
-				if _, err := protocol.DecodeAuthenticateResponse(result.Body); err != nil {
-					return result, nil
-				}
-			}
-			return result, nil
-		})
-		if value == nil {
-			return race.Result{Err: err}
-		}
-		result := value.(race.Result)
-		if err != nil {
-			result.Err = err
-		}
-		return result
-	}
-	return wrapped, nil
+	})}, nil
 }
 
 type Breaker struct {
 	breaker *gobreaker.CircuitBreaker
-	fn      race.AuthenticationFunc
 }
 
-func (b *Breaker) Authenticate(ctx context.Context) race.Result {
-	return b.fn(ctx)
+func (b *Breaker) Execute(ctx context.Context, fn race.AuthenticationFunc) race.Result {
+	value, err := b.breaker.Execute(func() (any, error) {
+		result := fn(ctx)
+		if errors.Is(result.Err, context.Canceled) {
+			return result, nil
+		}
+		if result.Err != nil {
+			return result, errUpstreamUnavailable
+		}
+		if result.StatusCode == 0 || result.StatusCode == http.StatusTooManyRequests || result.StatusCode >= http.StatusInternalServerError {
+			return result, errUpstreamUnavailable
+		}
+		if result.StatusCode == http.StatusOK {
+			if _, err := protocol.DecodeAuthenticateResponse(result.Body); err != nil {
+				return result, nil
+			}
+		}
+		return result, nil
+	})
+	if value == nil {
+		return race.Result{Err: err}
+	}
+	result := value.(race.Result)
+	if err != nil {
+		result.Err = err
+	}
+	return result
 }
 
 func (b *Breaker) State() gobreaker.State {
