@@ -1,0 +1,305 @@
+package migration
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/corematch/scribe/internal/assets"
+	"github.com/corematch/scribe/internal/protocol"
+	"github.com/redis/go-redis/v9"
+)
+
+const testMigrationID = "12345678-1234-1234-1234-123456789abc"
+
+func TestRedisStageStoresAtomicCredentialFreePackage(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	snapshot := validDigestSnapshot(t)
+	snapshot.Profile.Properties = []protocol.ProfileProperty{{Name: "textures", Value: "signed-value-secret", Signature: "signature-secret"}}
+	now := time.Date(2026, 11, 26, 12, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	identifierHash := strings.Repeat("ab", 32)
+
+	record, created, err := store.Stage(context.Background(), testMigrationID, identifierHash, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || record.State != StateStagedInRedis || record.Version != 1 || len(record.CommitDigest) != 64 {
+		t.Fatalf("Stage() = %+v, created=%v", record, created)
+	}
+	if record.Skin == nil || record.Cape == nil || !bytes.Equal(record.Skin.PNG, snapshot.Assets["SKIN"].PNG) {
+		t.Fatalf("staged assets = %+v", record)
+	}
+	loaded, err := store.Load(context.Background(), testMigrationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded, record) {
+		t.Fatalf("Load() = %+v, want %+v", loaded, record)
+	}
+
+	key := stagingKey(testMigrationID)
+	payload, err := client.HGet(context.Background(), key, "payload").Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"textures.example", "token=secret", "signed-value-secret", "signature-secret", "password", "accessToken", "properties"} {
+		if bytes.Contains(payload, []byte(forbidden)) {
+			t.Fatalf("staged payload contains %q: %s", forbidden, payload)
+		}
+	}
+	skin, err := client.HGet(context.Background(), key, "skin").Bytes()
+	if err != nil || !bytes.Equal(skin, snapshot.Assets["SKIN"].PNG) {
+		t.Fatalf("staged skin = %x, %v", skin, err)
+	}
+	if ttl := server.TTL(key); ttl != 24*time.Hour {
+		t.Fatalf("TTL = %v", ttl)
+	}
+}
+
+func TestRedisStageIsIdempotentAndRejectsDigestConflicts(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	snapshot := validDigestSnapshot(t)
+	identifierHash := strings.Repeat("ab", 32)
+	first, created, err := store.Stage(context.Background(), testMigrationID, identifierHash, snapshot)
+	if err != nil || !created {
+		t.Fatalf("Stage() = %+v, %v, %v", first, created, err)
+	}
+
+	equivalent := validDigestSnapshot(t)
+	equivalent.Textures.Timestamp++
+	skin := equivalent.Textures.Textures["SKIN"]
+	skin.URL = "https://textures.example/different.png"
+	equivalent.Textures.Textures["SKIN"] = skin
+	server.FastForward(time.Hour)
+	second, created, err := store.Stage(context.Background(), testMigrationID, strings.ToUpper(identifierHash), equivalent)
+	if err != nil || created || !reflect.DeepEqual(first, second) {
+		t.Fatalf("idempotent Stage() = %+v, %v, %v", second, created, err)
+	}
+	if ttl := server.TTL(stagingKey(testMigrationID)); ttl != 24*time.Hour {
+		t.Fatalf("refreshed TTL = %v", ttl)
+	}
+
+	conflicting := validDigestSnapshot(t)
+	conflicting.Profile.Name = "DifferentPlayer"
+	conflicting.Textures.ProfileName = conflicting.Profile.Name
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, conflicting); !errors.Is(err, ErrConflict) {
+		t.Fatalf("conflicting Stage() error = %v", err)
+	}
+	loaded, err := store.Load(context.Background(), testMigrationID)
+	if err != nil || !reflect.DeepEqual(loaded, first) {
+		t.Fatalf("conflict changed record: %+v, %v", loaded, err)
+	}
+}
+
+func TestRedisStageWithoutAssets(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	snapshot := Snapshot{
+		Profile: protocol.SignedProfile{ID: snapshotProfileID, Name: "LegacyPlayer"},
+		Textures: protocol.Textures{
+			ProfileID:   snapshotProfileID,
+			ProfileName: "LegacyPlayer",
+			Textures:    map[string]protocol.Texture{},
+		},
+		Assets: map[string]assets.Asset{},
+	}
+	record, created, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), snapshot)
+	if err != nil || !created {
+		t.Fatalf("Stage() = %+v, %v, %v", record, created, err)
+	}
+	loaded, err := store.Load(context.Background(), testMigrationID)
+	if err != nil || loaded.Skin != nil || loaded.Cape != nil {
+		t.Fatalf("Load() = %+v, %v", loaded, err)
+	}
+}
+
+func TestRedisStageAllowsOneConcurrentCreator(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	snapshot := validDigestSnapshot(t)
+	const workers = 10
+	created := make(chan bool, workers)
+	errs := make(chan error, workers)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, isNew, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), snapshot)
+			created <- isNew
+			errs <- err
+		}()
+	}
+	wait.Wait()
+	close(created)
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Stage() error = %v", err)
+		}
+	}
+	creators := 0
+	for isNew := range created {
+		if isNew {
+			creators++
+		}
+	}
+	if creators != 1 {
+		t.Fatalf("creators = %d", creators)
+	}
+}
+
+func TestRedisTransitionUsesCompareAndSet(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	if _, _, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, 1, StateCommitted); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("invalid transition error = %v", err)
+	}
+	applying, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying)
+	if err != nil || applying.Version != 2 || applying.State != StateApplying {
+		t.Fatalf("Transition() = %+v, %v", applying, err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale transition error = %v", err)
+	}
+	committed, err := store.Transition(context.Background(), testMigrationID, 2, StateCommitted)
+	if err != nil || committed.State != StateCommitted || committed.Version != 3 {
+		t.Fatalf("Transition() = %+v, %v", committed, err)
+	}
+	locked, err := store.Transition(context.Background(), testMigrationID, 3, StateLocked)
+	if err != nil || locked.State != StateLocked || locked.Version != 4 {
+		t.Fatalf("Transition() = %+v, %v", locked, err)
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, 4, StateRollingBack); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("committed rollback error = %v", err)
+	}
+}
+
+func TestRedisTransitionAllowsOneConcurrentWorker(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	if _, _, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	const workers = 12
+	results := make(chan error, workers)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			_, err := store.Transition(context.Background(), testMigrationID, 1, StateApplying)
+			results <- err
+		}()
+	}
+	wait.Wait()
+	close(results)
+	successes := 0
+	versionConflicts := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrVersionConflict):
+			versionConflicts++
+		default:
+			t.Fatalf("unexpected transition error: %v", err)
+		}
+	}
+	if successes != 1 || versionConflicts != workers-1 {
+		t.Fatalf("successes=%d, versionConflicts=%d", successes, versionConflicts)
+	}
+}
+
+func TestRedisStagingExpiresAndDetectsCorruption(t *testing.T) {
+	t.Run("expiry", func(t *testing.T) {
+		server := miniredis.RunT(t)
+		store, _ := testRedisStore(t, server, RedisOptions{TTL: time.Hour})
+		if _, _, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), validDigestSnapshot(t)); err != nil {
+			t.Fatal(err)
+		}
+		server.FastForward(2 * time.Hour)
+		if _, err := store.Load(context.Background(), testMigrationID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Load() error = %v", err)
+		}
+	})
+	t.Run("asset corruption", func(t *testing.T) {
+		server := miniredis.RunT(t)
+		store, client := testRedisStore(t, server, RedisOptions{})
+		if _, _, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), validDigestSnapshot(t)); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.HSet(context.Background(), stagingKey(testMigrationID), "skin", "corrupt").Err(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Load(context.Background(), testMigrationID); !errors.Is(err, ErrCorruptStaging) {
+			t.Fatalf("Load() error = %v", err)
+		}
+	})
+	t.Run("state corruption", func(t *testing.T) {
+		server := miniredis.RunT(t)
+		store, client := testRedisStore(t, server, RedisOptions{})
+		if _, _, err := store.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), validDigestSnapshot(t)); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.HSet(context.Background(), stagingKey(testMigrationID), "state", "INVALID").Err(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Load(context.Background(), testMigrationID); !errors.Is(err, ErrCorruptStaging) {
+			t.Fatalf("Load() error = %v", err)
+		}
+	})
+}
+
+func TestRedisStoreRejectsInvalidInputs(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	snapshot := validDigestSnapshot(t)
+	if _, _, err := store.Stage(context.Background(), "not-a-uuid", strings.Repeat("ab", 32), snapshot); err == nil {
+		t.Fatal("Stage() accepted an invalid migration ID")
+	}
+	if _, err := store.Load(context.Background(), "not-a-uuid"); err == nil {
+		t.Fatal("Load() accepted an invalid migration ID")
+	}
+	if _, err := store.Transition(context.Background(), testMigrationID, 1, State("INVALID")); err == nil {
+		t.Fatal("Transition() accepted an invalid state")
+	}
+	smallStore, err := NewRedisStore(store.client, RedisOptions{MaxPackageBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := smallStore.Stage(context.Background(), testMigrationID, strings.Repeat("ab", 32), snapshot); !errors.Is(err, ErrPackageTooLarge) {
+		t.Fatalf("Stage() error = %v", err)
+	}
+	if _, err := NewRedisStore(nil, RedisOptions{}); err == nil {
+		t.Fatal("NewRedisStore() accepted a nil client")
+	}
+	for _, options := range []RedisOptions{{TTL: -1}, {TTL: time.Microsecond}, {MaxPackageBytes: -1}} {
+		if _, err := NewRedisStore(store.client, options); err == nil {
+			t.Fatalf("NewRedisStore(%+v) unexpectedly succeeded", options)
+		}
+	}
+}
+
+func testRedisStore(t *testing.T, server *miniredis.Miniredis, options RedisOptions) (*RedisStore, *redis.Client) {
+	t.Helper()
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store, err := NewRedisStore(client, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store, client
+}
