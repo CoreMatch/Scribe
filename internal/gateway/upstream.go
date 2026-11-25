@@ -40,6 +40,7 @@ func (g *Gateway) doRequest(ctx context.Context, winner binding.Winner, incoming
 	}
 	request.Header = incoming.Header.Clone()
 	removeHopByHopHeaders(request.Header)
+	request.Header.Del("Accept-Encoding")
 	request.Header.Del("Forwarded")
 	request.Header["X-Forwarded-For"] = nil
 	request.Header.Del("X-Forwarded-Host")

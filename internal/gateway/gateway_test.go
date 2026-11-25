@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -103,6 +105,42 @@ func TestAuthenticateBindsNewWinnerAndNeverReraces(t *testing.T) {
 	}
 	if legacyCalls.Load() != legacyCallsBeforeRetry {
 		t.Fatalf("legacy calls = %d, want %d", legacyCalls.Load(), legacyCallsBeforeRetry)
+	}
+}
+
+func TestAuthenticateDecodesClientRequestedGzip(t *testing.T) {
+	var compressed bytes.Buffer
+	writer := gzip.NewWriter(&compressed)
+	if _, err := writer.Write([]byte(authenticationBody("gzip-token", "Player", true))); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "gzip" {
+			t.Errorf("Accept-Encoding = %q, want transport gzip negotiation", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Encoding", "gzip")
+		_, _ = w.Write(compressed.Bytes())
+	}))
+	defer upstream.Close()
+	env := newTestGateway(t, upstream.URL, upstream.URL, race.IntentUnspecified)
+	request := httptest.NewRequest(http.MethodPost, "https://scribe.example.com/authserver/authenticate", strings.NewReader(`{"username":"Player","password":"secret"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept-Encoding", "gzip")
+	response := httptest.NewRecorder()
+	env.handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "gzip-token") {
+		t.Fatalf("gzip authenticate = %d %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("client response remained compressed: %q", response.Header().Get("Content-Encoding"))
+	}
+	if _, err := env.store.GetBindingByToken(context.Background(), "gzip-token"); err != nil {
+		t.Fatalf("gzip authentication token binding missing: %v", err)
 	}
 }
 
