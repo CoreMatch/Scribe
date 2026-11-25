@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -42,6 +43,17 @@ type migratorFunc func(context.Context, migration.Input) (migration.Result, erro
 
 func (f migratorFunc) Migrate(ctx context.Context, input migration.Input) (migration.Result, error) {
 	return f(ctx, input)
+}
+
+type fakePendingChecker struct {
+	pending bool
+	err     error
+	calls   []string
+}
+
+func (f *fakePendingChecker) Pending(_ context.Context, identifier string) (bool, error) {
+	f.calls = append(f.calls, identifier)
+	return f.pending, f.err
 }
 
 func successfulMigration() migration.Result {
@@ -84,12 +96,13 @@ func TestAuthenticateBindsNewWinnerAndNeverReraces(t *testing.T) {
 		t.Fatalf("token binding missing: %v", err)
 	}
 
+	legacyCallsBeforeRetry := legacyCalls.Load()
 	response = env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
 	if response.Code != http.StatusOK {
 		t.Fatalf("second authenticate = %d %s", response.Code, response.Body.String())
 	}
-	if legacyCalls.Load() != 1 {
-		t.Fatalf("legacy calls = %d, want 1", legacyCalls.Load())
+	if legacyCalls.Load() != legacyCallsBeforeRetry {
+		t.Fatalf("legacy calls = %d, want %d", legacyCalls.Load(), legacyCallsBeforeRetry)
 	}
 }
 
@@ -445,6 +458,48 @@ func TestSignoutUsesPermanentBinding(t *testing.T) {
 	response := env.perform(http.MethodPost, "/authserver/signout", `{"username":"Player","password":"secret"}`)
 	if response.Code != http.StatusNoContent || armorialCalls.Load() != 1 {
 		t.Fatalf("signout = %d, armorial calls = %d", response.Code, armorialCalls.Load())
+	}
+}
+
+func TestSignoutBlocksPendingMigration(t *testing.T) {
+	for _, pendingErr := range []error{nil, errors.New("redis unavailable")} {
+		t.Run(fmt.Sprint(pendingErr), func(t *testing.T) {
+			var upstreamCalls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				upstreamCalls.Add(1)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer upstream.Close()
+			env := newTestGateway(t, upstream.URL, upstream.URL, race.IntentUnspecified)
+			checker := &fakePendingChecker{pending: pendingErr == nil, err: pendingErr}
+			env.gateway.migrationPending = checker
+			response := env.perform(http.MethodPost, "/authserver/signout", `{"username":"Player","password":"secret"}`)
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("signout status = %d, want 503", response.Code)
+			}
+			if upstreamCalls.Load() != 0 || len(checker.calls) != 1 || checker.calls[0] != "Player" {
+				t.Fatalf("pending signout reached upstream: calls=%d checks=%#v", upstreamCalls.Load(), checker.calls)
+			}
+		})
+	}
+}
+
+func TestSignoutWithoutPendingMigrationUsesLegacy(t *testing.T) {
+	var legacyCalls atomic.Int32
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		legacyCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer legacy.Close()
+	armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer armorial.Close()
+	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+	env.gateway.migrationPending = &fakePendingChecker{}
+	response := env.perform(http.MethodPost, "/authserver/signout", `{"username":"Player","password":"secret"}`)
+	if response.Code != http.StatusNoContent || legacyCalls.Load() != 1 {
+		t.Fatalf("signout = %d, legacy calls = %d", response.Code, legacyCalls.Load())
 	}
 }
 

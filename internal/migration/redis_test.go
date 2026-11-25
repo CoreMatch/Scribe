@@ -3,6 +3,8 @@ package migration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"reflect"
 	"strings"
@@ -366,6 +368,50 @@ func TestRedisStoreRejectsInvalidInputs(t *testing.T) {
 		if _, err := NewRedisStore(store.client, options); err == nil {
 			t.Fatalf("NewRedisStore(%+v) unexpectedly succeeded", options)
 		}
+	}
+}
+
+func TestRedisPendingUsesNormalizedIdentifierIndex(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, _ := testRedisStore(t, server, RedisOptions{})
+	normalized := "Player@example.com"
+	digest := sha256.Sum256([]byte(normalized))
+	identifierHash := hex.EncodeToString(digest[:])
+	if pending, err := store.Pending(context.Background(), "Player@Example.COM"); err != nil || pending {
+		t.Fatalf("Pending() before staging = %v, %v", pending, err)
+	}
+	if _, _, err := store.Stage(context.Background(), testMigrationID, identifierHash, validDigestSnapshot(t)); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := store.Pending(context.Background(), " Player@Example.COM "); err != nil || !pending {
+		t.Fatalf("Pending() after staging = %v, %v", pending, err)
+	}
+	if pending, err := store.Pending(context.Background(), "OtherPlayer"); err != nil || pending {
+		t.Fatalf("Pending() for another identifier = %v, %v", pending, err)
+	}
+	server.FastForward(25 * time.Hour)
+	if pending, err := store.Pending(context.Background(), normalized); err != nil || pending {
+		t.Fatalf("Pending() after expiry = %v, %v", pending, err)
+	}
+}
+
+func TestRedisPendingFailsClosedForCorruptIndex(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{})
+	normalized := "Player"
+	digest := sha256.Sum256([]byte(normalized))
+	identifierHash := hex.EncodeToString(digest[:])
+	if err := client.Set(context.Background(), identifierIndexKey(identifierHash), testMigrationID, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := store.Pending(context.Background(), normalized); pending || !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Pending() with missing package = %v, %v", pending, err)
+	}
+	if err := client.Set(context.Background(), identifierIndexKey(identifierHash), "invalid", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := store.Pending(context.Background(), normalized); pending || !errors.Is(err, ErrCorruptStaging) {
+		t.Fatalf("Pending() with invalid index = %v, %v", pending, err)
 	}
 }
 

@@ -35,6 +35,10 @@ type Runner interface {
 	Migrate(context.Context, Input) (Result, error)
 }
 
+type PendingChecker interface {
+	Pending(context.Context, string) (bool, error)
+}
+
 type SnapshotCapturer interface {
 	Capture(context.Context, protocol.Profile) (Snapshot, error)
 }

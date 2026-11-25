@@ -55,18 +55,19 @@ func run(ctx context.Context, log *slog.Logger) error {
 		}
 	}()
 
-	migrator, err := newMigrator(cfg, redisClient, log)
+	migrator, migrationPending, err := newMigrator(cfg, redisClient, log)
 	if err != nil {
 		return err
 	}
 	gateway, err := gateway.New(gateway.Options{
-		PublicBaseURL:   cfg.PublicBaseURL,
-		LegacyBaseURL:   cfg.LegacyBaseURL,
-		ArmorialBaseURL: cfg.ArmorialBaseURL,
-		RequestTimeout:  cfg.RequestTimeout,
-		MaxRequestBody:  cfg.MaxRequestBody,
-		Circuit:         circuitbreakerSettings(cfg),
-		Migrator:        migrator,
+		PublicBaseURL:    cfg.PublicBaseURL,
+		LegacyBaseURL:    cfg.LegacyBaseURL,
+		ArmorialBaseURL:  cfg.ArmorialBaseURL,
+		RequestTimeout:   cfg.RequestTimeout,
+		MaxRequestBody:   cfg.MaxRequestBody,
+		Circuit:          circuitbreakerSettings(cfg),
+		Migrator:         migrator,
+		MigrationPending: migrationPending,
 	}, store, log)
 	if err != nil {
 		return err
@@ -93,31 +94,35 @@ func openRedis(rawURL string) (*redis.Client, error) {
 	return redis.NewClient(options), nil
 }
 
-func newMigrator(cfg config.Config, redisClient redis.UniversalClient, log *slog.Logger) (migration.Runner, error) {
+func newMigrator(cfg config.Config, redisClient redis.UniversalClient, log *slog.Logger) (migration.Runner, migration.PendingChecker, error) {
 	profiles, err := profile.New(cfg.LegacyBaseURL, profile.Options{Timeout: cfg.RequestTimeout})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	downloader, err := texture.New(texture.Options{Timeout: cfg.RequestTimeout})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	snapshotter, err := migration.New(profiles, downloader, migration.Options{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	staging, err := migration.NewRedisStore(redisClient, migration.RedisOptions{
 		TTL:             cfg.MigrationTTL,
 		MaxPackageBytes: cfg.MigrationMaxPackageBytes,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	committer, err := migration.NewClient(cfg.ArmorialBaseURL, cfg.MigrationServiceToken, migration.ClientOptions{
 		Timeout: cfg.MigrationTimeout,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return migration.NewService(snapshotter, staging, committer, log)
+	service, err := migration.NewService(snapshotter, staging, committer, log)
+	if err != nil {
+		return nil, nil, err
+	}
+	return service, staging, nil
 }

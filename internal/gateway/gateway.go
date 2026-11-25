@@ -19,32 +19,34 @@ import (
 )
 
 type Options struct {
-	PublicBaseURL   string
-	LegacyBaseURL   string
-	ArmorialBaseURL string
-	RequestTimeout  time.Duration
-	MaxRequestBody  int64
-	MaxResponseBody int64
-	Circuit         circuitbreaker.Settings
-	MigrationIntent race.Intent
-	Migrator        migration.Runner
+	PublicBaseURL    string
+	LegacyBaseURL    string
+	ArmorialBaseURL  string
+	RequestTimeout   time.Duration
+	MaxRequestBody   int64
+	MaxResponseBody  int64
+	Circuit          circuitbreaker.Settings
+	MigrationIntent  race.Intent
+	Migrator         migration.Runner
+	MigrationPending migration.PendingChecker
 }
 
 type Gateway struct {
-	store           binding.Store
-	client          *http.Client
-	publicBaseURL   *url.URL
-	legacyBaseURL   *url.URL
-	armorialBaseURL *url.URL
-	legacyProxy     http.Handler
-	armorialProxy   http.Handler
-	legacyBreaker   *circuitbreaker.Breaker
-	armorialBreaker *circuitbreaker.Breaker
-	maxRequestBody  int64
-	maxResponseBody int64
-	migrationIntent race.Intent
-	migrator        migration.Runner
-	log             *slog.Logger
+	store            binding.Store
+	client           *http.Client
+	publicBaseURL    *url.URL
+	legacyBaseURL    *url.URL
+	armorialBaseURL  *url.URL
+	legacyProxy      http.Handler
+	armorialProxy    http.Handler
+	legacyBreaker    *circuitbreaker.Breaker
+	armorialBreaker  *circuitbreaker.Breaker
+	maxRequestBody   int64
+	maxResponseBody  int64
+	migrationIntent  race.Intent
+	migrator         migration.Runner
+	migrationPending migration.PendingChecker
+	log              *slog.Logger
 }
 
 func New(options Options, store binding.Store, log *slog.Logger) (*Gateway, error) {
@@ -106,20 +108,21 @@ func New(options Options, store binding.Store, log *slog.Logger) (*Gateway, erro
 		},
 	}
 	return &Gateway{
-		store:           store,
-		client:          client,
-		publicBaseURL:   publicURL,
-		legacyBaseURL:   legacyURL,
-		armorialBaseURL: armorialURL,
-		legacyProxy:     proxy.New(legacyURL, publicURL, options.RequestTimeout, log),
-		armorialProxy:   proxy.New(armorialURL, publicURL, options.RequestTimeout, log),
-		legacyBreaker:   legacyBreaker,
-		armorialBreaker: armorialBreaker,
-		maxRequestBody:  maxRequestBody,
-		maxResponseBody: maxResponseBody,
-		migrationIntent: options.MigrationIntent,
-		migrator:        options.Migrator,
-		log:             log,
+		store:            store,
+		client:           client,
+		publicBaseURL:    publicURL,
+		legacyBaseURL:    legacyURL,
+		armorialBaseURL:  armorialURL,
+		legacyProxy:      proxy.New(legacyURL, publicURL, options.RequestTimeout, log),
+		armorialProxy:    proxy.New(armorialURL, publicURL, options.RequestTimeout, log),
+		legacyBreaker:    legacyBreaker,
+		armorialBreaker:  armorialBreaker,
+		maxRequestBody:   maxRequestBody,
+		maxResponseBody:  maxResponseBody,
+		migrationIntent:  options.MigrationIntent,
+		migrator:         options.Migrator,
+		migrationPending: options.MigrationPending,
+		log:              log,
 	}, nil
 }
 

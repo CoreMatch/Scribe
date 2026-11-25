@@ -51,8 +51,8 @@ func TestNewMigratorConstructsProductionDependencies(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer redisClient.Close()
-	migrator, err := newMigrator(cfg, redisClient, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil || migrator == nil {
-		t.Fatalf("newMigrator() = %v, %v", migrator, err)
+	migrator, pending, err := newMigrator(cfg, redisClient, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil || migrator == nil || pending == nil {
+		t.Fatalf("newMigrator() = %v, %v, %v", migrator, pending, err)
 	}
 }

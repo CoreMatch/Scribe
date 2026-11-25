@@ -245,6 +245,18 @@ func (g *Gateway) signout(w http.ResponseWriter, r *http.Request) {
 		g.log.Error("signout binding lookup failed")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Service temporarily unavailable.")
 		return
+	} else if g.migrationPending != nil {
+		pending, pendingErr := g.migrationPending.Pending(r.Context(), identifier)
+		if pendingErr != nil {
+			g.log.Info("signout blocked", "reason", "migration_state_unknown")
+			writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Service temporarily unavailable.")
+			return
+		}
+		if pending {
+			g.log.Info("signout blocked", "reason", "migration_pending")
+			writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
+			return
+		}
 	}
 	g.writeResult(w, g.execute(r.Context(), winner, r, body))
 }

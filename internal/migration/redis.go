@@ -2,6 +2,8 @@ package migration
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -163,6 +165,33 @@ func NewRedisStore(client redis.UniversalClient, options RedisOptions) (*RedisSt
 		options.MaxPackageBytes = 16 << 20
 	}
 	return &RedisStore{client: client, ttl: options.TTL, maxPackageBytes: options.MaxPackageBytes, now: time.Now}, nil
+}
+
+func (s *RedisStore) Pending(ctx context.Context, identifier string) (bool, error) {
+	normalized, err := protocol.NormalizeIdentifier(identifier)
+	if err != nil {
+		return false, err
+	}
+	digest := sha256.Sum256([]byte(normalized))
+	identifierHash := hex.EncodeToString(digest[:])
+	migrationID, err := s.client.Get(ctx, identifierIndexKey(identifierHash)).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !validMigrationID(migrationID) {
+		return false, ErrCorruptStaging
+	}
+	record, err := s.Load(ctx, migrationID)
+	if err != nil {
+		return false, err
+	}
+	if record.IdentifierHash != identifierHash {
+		return false, ErrCorruptStaging
+	}
+	return true, nil
 }
 
 func (s *RedisStore) Stage(ctx context.Context, migrationID, identifierHash string, snapshot Snapshot) (StagedMigration, bool, error) {
