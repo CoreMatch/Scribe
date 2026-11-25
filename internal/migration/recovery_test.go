@@ -263,6 +263,80 @@ func TestRecoveryRunContinuesAfterPerMigrationFailure(t *testing.T) {
 	}
 }
 
+func TestRecoveryReconcileFailurePreservesStaging(t *testing.T) {
+	record := recoveryRecord(t, StateReconciling)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileErr: errors.New("armorial unavailable")}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); err == nil {
+		t.Fatal("recover() ignored reconcile failure")
+	}
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 || !reflect.DeepEqual(client.calls, []string{"reconcile"}) {
+		t.Fatalf("transitions = %#v, discards = %#v, calls = %#v", staging.transitions, staging.discards, client.calls)
+	}
+}
+
+func TestRecoveryRollbackConflictPreservesStaging(t *testing.T) {
+	record := recoveryRecord(t, StateReconciling)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{
+		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying},
+		rollbackErr:     ErrRollbackNotAllowed,
+	}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrRollbackNotAllowed) {
+		t.Fatalf("recover() error = %v, want ErrRollbackNotAllowed", err)
+	}
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 {
+		t.Fatalf("transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+	}
+}
+
+func TestRecoveryRejectsUnknownRollbackResult(t *testing.T) {
+	record := recoveryRecord(t, StateReconciling)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{
+		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying},
+		rollbackStatus:  MigrationStatus{MigrationID: record.MigrationID, Status: MigrationUnknown},
+	}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("recover() error = %v, want ErrInvalidResponse", err)
+	}
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 {
+		t.Fatalf("transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+	}
+}
+
+func TestRecoveryTokenBindingFailurePreventsLock(t *testing.T) {
+	record := recoveryRecord(t, StateCommitted)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: committedRecoveryStatus(t, record)}
+	bindings := &fakeRecoveryBindings{tokenErr: errors.New("sqlite unavailable")}
+	recovery := newTestRecovery(staging, client, bindings)
+	if err := recovery.recover(context.Background(), record); err == nil {
+		t.Fatal("recover() ignored token binding failure")
+	}
+	if len(bindings.bindCalls) != 1 || len(bindings.tokens) != 1 || len(staging.transitions) != 0 {
+		t.Fatalf("bindings = %#v, tokens = %#v, transitions = %#v", bindings.bindCalls, bindings.tokens, staging.transitions)
+	}
+}
+
+func TestRecoveryRunStopsWhenContextIsCancelled(t *testing.T) {
+	record := recoveryRecord(t, StateCommitted)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: committedRecoveryStatus(t, record)}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := recovery.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context.Canceled", err)
+	}
+	if len(client.calls) != 0 || len(staging.transitions) != 0 {
+		t.Fatalf("calls = %#v, transitions = %#v", client.calls, staging.transitions)
+	}
+}
+
 func TestNewRecoveryRequiresDependencies(t *testing.T) {
 	if _, err := NewRecovery(nil, &fakeRecoveryClient{}, &fakeRecoveryBindings{}, nil); err == nil {
 		t.Fatal("NewRecovery() accepted nil staging")
