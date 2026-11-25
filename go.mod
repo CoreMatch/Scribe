@@ -3,6 +3,7 @@ module github.com/corematch/scribe
 go 1.26.4
 
 require (
+	github.com/sony/gobreaker v1.0.0
 	golang.org/x/text v0.42.0
 	modernc.org/sqlite v1.63.0
 )
