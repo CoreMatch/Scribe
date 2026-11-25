@@ -396,6 +396,36 @@ func TestUnknownTargetStateBlocksWithoutBinding(t *testing.T) {
 	}
 }
 
+func TestProfilelessTargetSuccessDoesNotIssueUnboundToken(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "legacy rejects credentials", status: http.StatusForbidden, body: `{"error":"ForbiddenOperationException"}`},
+		{name: "legacy has no profile", status: http.StatusOK, body: authenticationBody("legacy-token", "LegacyPlayer", false)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, test.status, test.body)
+			}))
+			defer legacy.Close()
+			armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, authenticationBody("unbound-token", "Player", false))
+			}))
+			defer armorial.Close()
+			env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+			response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
+			if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "unbound-token") {
+				t.Fatalf("profileless success response = %d %s", response.Code, response.Body.String())
+			}
+			if _, err := env.store.GetBinding(context.Background(), "Player"); !errors.Is(err, binding.ErrNotFound) {
+				t.Fatalf("profileless success created a binding: %v", err)
+			}
+		})
+	}
+}
+
 func TestMalformedTargetProfilesBlockWithoutBinding(t *testing.T) {
 	for _, body := range []string{
 		`{"accessToken":"target-token","clientToken":"client","selectedProfile":{"id":"not-a-uuid","name":"Player"}}`,

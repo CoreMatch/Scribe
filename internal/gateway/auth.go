@@ -69,6 +69,10 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 		g.log.Info("authentication blocked", "reason", decision.Reason)
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication service temporarily unavailable.")
 	case race.NoBinding:
+		if decision.Target.Err == nil && decision.Target.StatusCode == http.StatusOK {
+			writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication could not be completed.")
+			return
+		}
 		g.writeResult(w, decision.Target)
 	default:
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication service temporarily unavailable.")
