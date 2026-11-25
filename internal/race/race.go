@@ -42,6 +42,7 @@ const (
 
 type Result struct {
 	StatusCode int
+	Header     http.Header
 	Body       []byte
 	Err        error
 }
@@ -49,6 +50,8 @@ type Result struct {
 type Decision struct {
 	Outcome Outcome
 	Reason  Reason
+	Target  Result
+	Legacy  Result
 }
 
 type AuthenticationFunc func(context.Context) Result
@@ -115,14 +118,17 @@ func Run(ctx context.Context, intent Intent, target, legacy AuthenticationFunc) 
 	case targetResult = <-targetCh:
 	}
 	if classifyTarget(targetResult) == targetSuccessWithProfile {
-		return Decision{Outcome: NewWins}
+		return Decision{Outcome: NewWins, Target: targetResult}
 	}
 	select {
 	case <-ctx.Done():
 		return Decision{Outcome: BlockRetry, Reason: ReasonTargetStateUnknown}
 	case legacyResult = <-legacyCh:
 	}
-	return Evaluate(targetResult, legacyResult, intent)
+	decision := Evaluate(targetResult, legacyResult, intent)
+	decision.Target = targetResult
+	decision.Legacy = legacyResult
+	return decision
 }
 
 type targetKind int
