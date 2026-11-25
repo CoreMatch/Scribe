@@ -1,0 +1,72 @@
+package protocol
+
+import (
+	"strings"
+	"testing"
+)
+
+func TestDecodeAuthenticateRequest(t *testing.T) {
+	request, err := DecodeAuthenticateRequest([]byte(`{"username":"Player","password":"secret","clientToken":"client","requestUser":true}`))
+	if err != nil {
+		t.Fatalf("DecodeAuthenticateRequest() error = %v", err)
+	}
+	if request.Username != "Player" || request.Password != "secret" || request.ClientToken != "client" || request.RequestUser == nil || !*request.RequestUser {
+		t.Fatalf("DecodeAuthenticateRequest() = %+v", request)
+	}
+}
+
+func TestDecodeAuthenticateRequestRejectsMissingCredentials(t *testing.T) {
+	for _, body := range []string{`{}`, `{"username":"Player"}`, `{"password":"secret"}`, `not-json`} {
+		if _, err := DecodeAuthenticateRequest([]byte(body)); err == nil {
+			t.Fatalf("DecodeAuthenticateRequest(%q) unexpectedly succeeded", body)
+		}
+	}
+}
+
+func TestDecodeAuthenticateResponse(t *testing.T) {
+	response, err := DecodeAuthenticateResponse([]byte(`{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"uuid","name":"Player"}}`))
+	if err != nil {
+		t.Fatalf("DecodeAuthenticateResponse() error = %v", err)
+	}
+	if response.SelectedProfile == nil || response.SelectedProfile.ID != "uuid" {
+		t.Fatalf("DecodeAuthenticateResponse() = %+v", response)
+	}
+}
+
+func TestDecodeAuthenticateResponseRejectsMalformedSuccess(t *testing.T) {
+	for _, body := range []string{
+		`{}`,
+		`{"accessToken":"access"}`,
+		`{"accessToken":"access","clientToken":"client","selectedProfile":{"id":"uuid"}}`,
+		`not-json`,
+	} {
+		if _, err := DecodeAuthenticateResponse([]byte(body)); err == nil {
+			t.Fatalf("DecodeAuthenticateResponse(%q) unexpectedly succeeded", body)
+		}
+	}
+}
+
+func TestNormalizeIdentifier(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{input: " Player ", want: "Player"},
+		{input: "Player@Example.COM", want: "Player@example.com"},
+		{input: "e\u0301@example.com", want: "é@example.com"},
+	}
+	for _, tt := range tests {
+		got, err := NormalizeIdentifier(tt.input)
+		if err != nil || got != tt.want {
+			t.Fatalf("NormalizeIdentifier(%q) = %q, %v; want %q", tt.input, got, err, tt.want)
+		}
+	}
+}
+
+func TestNormalizeIdentifierRejectsInvalidValues(t *testing.T) {
+	for _, input := range []string{"", "   ", "player\nname", strings.Repeat("a", 255)} {
+		if _, err := NormalizeIdentifier(input); err == nil {
+			t.Fatalf("NormalizeIdentifier(%q) unexpectedly succeeded", input)
+		}
+	}
+}
