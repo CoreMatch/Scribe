@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -106,6 +107,56 @@ func TestNewMigratorConstructsProductionDependenciesAndRecovery(t *testing.T) {
 	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if !strings.Contains(response.Body.String(), `scribe_recovery_scans_total{result="success"} 1`) {
 		t.Fatalf("recovery metric was not recorded: %s", response.Body.String())
+	}
+}
+
+func TestRunAfterRecoveryWaitsBeforeStartingServer(t *testing.T) {
+	recoveryStarted := make(chan struct{})
+	releaseRecovery := make(chan struct{})
+	serverStarted := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runAfterRecovery(context.Background(), func(context.Context) error {
+			close(recoveryStarted)
+			<-releaseRecovery
+			return nil
+		}, func() error {
+			close(serverStarted)
+			return nil
+		})
+	}()
+
+	select {
+	case <-recoveryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not start")
+	}
+	select {
+	case <-serverStarted:
+		t.Fatal("server started before recovery completed")
+	default:
+	}
+	close(releaseRecovery)
+	select {
+	case <-serverStarted:
+	case <-time.After(time.Second):
+		t.Fatal("server did not start after recovery completed")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunAfterRecoveryDoesNotStartServerOnFailure(t *testing.T) {
+	started := false
+	err := runAfterRecovery(context.Background(), func(context.Context) error {
+		return context.Canceled
+	}, func() error {
+		started = true
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || started {
+		t.Fatalf("runAfterRecovery() error = %v, server started = %v", err, started)
 	}
 }
 

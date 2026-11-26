@@ -64,29 +64,35 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if err := recovery.Run(ctx); err != nil {
+	return runAfterRecovery(ctx, recovery.Run, func() error {
+		gateway, err := gateway.New(gateway.Options{
+			PublicBaseURL:    cfg.PublicBaseURL,
+			LegacyBaseURL:    cfg.LegacyBaseURL,
+			ArmorialBaseURL:  cfg.ArmorialBaseURL,
+			RequestTimeout:   cfg.RequestTimeout,
+			MaxRequestBody:   cfg.MaxRequestBody,
+			Circuit:          circuitbreakerSettings(cfg),
+			Migrator:         migrator,
+			MigrationPending: migrationPending,
+			Metrics:          registry,
+		}, store, log)
+		if err != nil {
+			return err
+		}
+		ready := func() error {
+			checkCtx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
+			defer cancel()
+			return checkReady(checkCtx, redisClient, store)
+		}
+		return server.New(cfg.ListenAddr, httpMux(cfg, gateway, ready, registry), cfg.ShutdownTimeout, cfg.WriteTimeout, log).Run(ctx)
+	})
+}
+
+func runAfterRecovery(ctx context.Context, recover func(context.Context) error, start func() error) error {
+	if err := recover(ctx); err != nil {
 		return err
 	}
-	gateway, err := gateway.New(gateway.Options{
-		PublicBaseURL:    cfg.PublicBaseURL,
-		LegacyBaseURL:    cfg.LegacyBaseURL,
-		ArmorialBaseURL:  cfg.ArmorialBaseURL,
-		RequestTimeout:   cfg.RequestTimeout,
-		MaxRequestBody:   cfg.MaxRequestBody,
-		Circuit:          circuitbreakerSettings(cfg),
-		Migrator:         migrator,
-		MigrationPending: migrationPending,
-		Metrics:          registry,
-	}, store, log)
-	if err != nil {
-		return err
-	}
-	ready := func() error {
-		checkCtx, cancel := context.WithTimeout(context.Background(), cfg.RequestTimeout)
-		defer cancel()
-		return checkReady(checkCtx, redisClient, store)
-	}
-	return server.New(cfg.ListenAddr, httpMux(cfg, gateway, ready, registry), cfg.ShutdownTimeout, cfg.WriteTimeout, log).Run(ctx)
+	return start()
 }
 
 func runPureProxy(ctx context.Context, cfg config.Config, log *slog.Logger) error {
