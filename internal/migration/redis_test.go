@@ -75,7 +75,7 @@ func TestRedisRecordRollbackIdentityIsAtomicAndImmutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity := RollbackIdentity{CoreUserID: "core-uuid", CoreUserOwnership: "preexisting", AccountID: "42"}
+	identity := RollbackIdentity{CoreUserID: "core-uuid", CoreUserOwnership: "created_by_migration", AccountID: "42"}
 	if _, err := store.RecordRollbackIdentity(ctx, record.MigrationID, record.Version, identity); !errors.Is(err, ErrCorruptStaging) {
 		t.Fatalf("identity recorded outside recovery: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestRedisRecordRollbackIdentityIsAtomicAndImmutable(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(loaded, record) {
 		t.Fatalf("identity changed after conflict: %+v, %v", loaded, err)
 	}
-	if err := client.HSet(ctx, stagingKey(testMigrationID), "rollback_identity", `{"core_user_id":"core-uuid","core_user_ownership":"created_by_migration","account_id":"42"}`).Err(); err != nil {
+	if err := client.HSet(ctx, stagingKey(testMigrationID), "rollback_identity", `{"core_user_id":"core-uuid","core_user_ownership":"unknown","account_id":"42"}`).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Load(ctx, testMigrationID); !errors.Is(err, ErrCorruptStaging) {

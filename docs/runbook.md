@@ -57,7 +57,7 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 
 `SCRIBE_PURE_PROXY=true` 时，根接口与全部 authserver 端点直接转发到旧上游，不执行 JSON 解析、竞速、迁移或绑定路由。该模式不连接 Redis、SQLite 或 Armorial，也不执行启动恢复；`/readyz` 仅表示进程可响应。
 
-正常迁移模式下，启动时先执行 Redis 暂存扫描与恢复，再开始监听 HTTP。若扫描失败，进程退出；恢复单条记录失败时记录 `migration recovery blocked`、计入 `result="blocked"` 指标并继续处理其他记录。committed 只有完整匹配 Core 权属与 ID、account、固定 profile、暂存资产摘要且无漂移时才重绑；自动回滚前先把权威对账中的既有 Core UUID/权属与 account ID 写入 Redis，`ROLLING_BACK`/`ROLLED_BACK` 每次启动都重新对账并逐项比对这份回滚身份。未知状态、缺失既有 Core 用户、迁移新建 Core 用户仍存在、身份或资产不符、缺少回滚身份的旧记录、已提交记录缺权威结果时，不会自动回滚、删除暂存或建立绑定。
+正常迁移模式下，启动时先执行 Redis 暂存扫描与恢复，再开始监听 HTTP。若扫描失败，进程退出；恢复单条记录失败时记录 `migration recovery blocked`、计入 `result="blocked"` 指标并继续处理其他记录。committed 只有完整匹配 Core 权属与 ID、account、固定 profile、暂存资产摘要且无漂移时才重绑；自动回滚前先把权威对账中的 Core UUID/权属与 account ID 写入 Redis，`ROLLING_BACK`/`ROLLED_BACK` 每次启动都重新对账并逐项比对这份回滚身份。未知状态、缺失既有 Core 用户、回滚后迁移新建 Core 用户仍存在、身份或资产不符、缺少回滚身份的旧记录、已提交记录缺权威结果时，不会自动回滚、删除暂存或建立绑定。
 
 ## 正常迁移观测
 
@@ -145,8 +145,8 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 1. 保持用户阻断，signout 不解除阻断。
 2. 记录日志中的 `migration_id`，通过 Armorial reconcile 获取权威状态。
 3. 若已提交，等待启动恢复完成 Armorial 绑定并进入 `LOCKED`。
-4. 若未提交且资源权属明确，由 Armorial rollback 清理本次创建的本地资源；既有 Core 账号始终保留。
-5. 若迁移创建了 Core 用户，Core 补偿契约落地前 Armorial 会以 `migration_rollback_not_allowed` 拒绝回滚，必须保持阻断并告警，不得手工删除 Core 用户。
+4. 若未提交且资源权属明确，由 Armorial rollback 清理本次创建的本地资源；迁移新建 Core 用户通过 Core 补偿删除，既有 Core 账号始终保留。
+5. 若 Core 补偿失败或返回权属不符，保持阻断并告警，不得手工删除 Core 用户。
 6. 若权属不明或状态未知，停止自动回滚并告警。
 
 ### 资产冲突
@@ -179,7 +179,7 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 5. 已提交记录完成绑定后进入 `LOCKED`；未提交记录完成回滚后删除暂存；未知记录保持阻断。
 6. 已提交但 reconcile 未返回权威结果，或返回资源漂移时，保持 `COMMITTED` 与用户阻断；不得猜测会话、手工写 binding 或调用 rollback。
 7. committed 重绑前逐项核对 Core 权属与 ID、account、固定 profile 和暂存资产摘要；任何缺失、额外、重复或身份不符的资源都会阻断。
-8. 自动回滚前核对既有 Core 用户存在、固定 profile 与暂存资产身份一致，并原子持久化权威 Core UUID/权属与 account ID；`ROLLING_BACK` 与 `ROLLED_BACK` 重启时再次执行权威对账，Core/account 身份、缺省语义或资产清单不符不得删除暂存。
+8. 自动回滚前核对 Core 用户权属与 ID、固定 profile 与暂存资产身份一致，并原子持久化权威 Core UUID/权属与 account ID；`ROLLING_BACK` 与 `ROLLED_BACK` 重启时再次执行权威对账，Core/account 身份、缺省语义或资产清单不符不得删除暂存。回滚后既有 Core 用户必须仍存在，迁移新建 Core 用户必须不存在。
 9. 重复启动应幂等：`LOCKED` 不重复迁移，已验证的回滚暂存删除后不再处理，缺结果或清单漂移的已提交记录每次均保持阻断。
 
 在受信任的运维主机上需要手动 reconcile 时，关闭 shell tracing，使用环境变量注入服务凭据：

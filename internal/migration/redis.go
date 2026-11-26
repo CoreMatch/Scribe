@@ -736,7 +736,7 @@ func validateRollbackIdentity(identity RollbackIdentity) error {
 		if identity.CoreUserOwnership != "" {
 			return ErrCorruptStaging
 		}
-	} else if identity.CoreUserOwnership != "preexisting" {
+	} else if identity.CoreUserOwnership != "preexisting" && identity.CoreUserOwnership != "created_by_migration" {
 		return ErrCorruptStaging
 	}
 	if identity.AccountID != "" {

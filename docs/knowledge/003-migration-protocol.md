@@ -70,6 +70,8 @@ STAGED / APPLYING / UNKNOWN
 
 `reconcile` 是读取实际资源与迁移日志，不产生新的业务写入。`rollback` 只处理未提交且权属明确的迁移；已提交迁移返回冲突错误。已提交但缺权威结果或存在资源漂移时保持阻断，不建立永久绑定。
 
+协调器是迁移提交状态的唯一权威：Core 不保存独立的 committed 标记，只有协调器权威对账确认未提交后才会调用 Core 补偿。Core 仅按 `created_by_migration_id` 精确匹配删除本次迁移新建的用户，既有用户始终保留。Scribe 在回滚前持久化 Core/account 身份；回滚完成后，迁移新建 Core 用户必须不存在，既有 Core 用户必须仍存在。
+
 ## 资产冲突矩阵
 
 | Legacy | Armorial | 决策 |

@@ -184,12 +184,12 @@ func validateRollbackOwnership(status MigrationStatus, record StagedMigration) e
 		switch resource.Kind {
 		case "core_user":
 			if resource.Ownership == "created_by_migration" {
-				if resource.Present {
-					return ErrRollbackNotAllowed
+				if !resource.Present || resource.ResourceID == "" {
+					return ErrInvalidResponse
 				}
-				return ErrInvalidResponse
+				continue
 			}
-			if !resource.Present {
+			if resource.Ownership != "preexisting" || !resource.Present || resource.ResourceID == "" {
 				return ErrInvalidResponse
 			}
 		case "game_account":
@@ -312,7 +312,12 @@ func validateRolledBackInventory(status MigrationStatus, record StagedMigration)
 		"profile": {Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
 	}
 	if identity.CoreUserID != "" {
-		expected["core_user"] = MigrationResource{Kind: "core_user", ResourceID: identity.CoreUserID, Ownership: identity.CoreUserOwnership, Present: true}
+		expected["core_user"] = MigrationResource{
+			Kind:       "core_user",
+			ResourceID: identity.CoreUserID,
+			Ownership:  identity.CoreUserOwnership,
+			Present:    identity.CoreUserOwnership == "preexisting",
+		}
 	}
 	if identity.AccountID != "" {
 		expected["game_account"] = MigrationResource{Kind: "game_account", ResourceID: identity.AccountID, Ownership: "created_by_migration", Present: false}

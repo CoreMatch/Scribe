@@ -43,7 +43,8 @@ Redis 是迁移暂存区，不是账号真相来源。建议：
 - 对账比较迁移日志、Core 用户、Yggdrasil profile 与资产记录。
 - committed 重绑前必须完整匹配 Core 权属与 ID、account、固定 profile、暂存资产摘要及资源存在性；缺失、额外、重复或身份不符均失败关闭。
 - `ROLLING_BACK` 与 `ROLLED_BACK` 每次启动都重新权威对账并验证回滚清单，不能仅凭 Redis 状态删除暂存。
-- 自动回滚前将权威对账中的既有 Core UUID/权属与 migration-owned account ID 原子写入 Redis；回滚后及重启时逐项比对，Core/account 未分配时允许缺省，身份缺失或变化均失败关闭。
+- 自动回滚前将权威对账中的 Core UUID/权属与 migration-owned account ID 原子写入 Redis；回滚后及重启时逐项比对，Core/account 未分配时允许缺省。既有 Core 用户必须仍存在，迁移新建 Core 用户必须已由 Core 补偿删除；身份缺失或变化均失败关闭。
+- 协调器是提交状态的唯一权威；Core 不保存独立 committed 标记，只按精确的 `created_by_migration_id` 补偿本次迁移新建的用户。
 - 资源存在但权属不明、状态未知或身份与暂存包不一致时停止自动回滚并告警。
 - 已提交迁移只允许使用权威结果重新绑定并锁定，不允许回滚；缺结果或存在漂移时保持阻断。
 - 回滚必须可重试且只删除本次迁移明确创建的资源。
@@ -86,7 +87,7 @@ Redis 是迁移暂存区，不是账号真相来源。建议：
 ## 上线检查
 
 - 新旧上游均可访问，旧上游仅内部可达。
-- Armorial reconcile/rollback API 已部署；Core 补偿契约仍待决策，未实现前迁移新建 Core 用户的 rollback 保持失败封闭。
+- Armorial reconcile/rollback API 已部署；迁移新建 Core 用户由协调器在权威确认未提交后调用 Core 补偿删除，既有 Core 用户不参与补偿。
 - Redis 与 Armorial 签名配置已就绪。
 - 目标 authenticate 已通过同 UUID、皮肤、披风与签名验证。
 - 限流、超时、熔断与 fail-closed 行为已演练。

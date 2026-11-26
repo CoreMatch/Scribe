@@ -21,7 +21,7 @@
 - 冻结竞速规则、迁移范围、状态机与错误码。
 - 在 HA-Contract 注册迁移 commit/reconcile/rollback 端点。
 - 明确占位邮箱、Core username、固定 profile UUID 与 `skin_sync=false`。
-- 为计划端点添加临时 drift exemption，并记录移除条件。
+- 为计划端点添加临时 drift exemption，并在对应实现落地时同批移除。
 
 验收：
 
@@ -30,7 +30,7 @@
 - 错误码全部先注册后使用。
 - ADR、知识库与契约无冲突。
 
-完成记录（2026-11-26）：HA-Contract `66b165a` 注册迁移端点、错误码与权威 `user` 契约；OpenAPI validity、business API drift/self-test、field drift 和 consumer URL 检查全部通过。计划路由的 drift exemption 将在对应实现落地时同批移除。
+完成记录（2026-11-26）：HA-Contract `66b165a` 注册迁移端点、错误码与权威 `user` 契约；OpenAPI validity、business API drift/self-test、field drift 和 consumer URL 检查全部通过。Armorial `e706012` 与 HRPAuth-Yggdrasil-API `31c7a66` 落地后，计划路由的 drift exemption 已同批移除。
 
 ## M1：Scribe 基础网关与永久绑定
 
@@ -107,13 +107,13 @@
 - Armorial reconcile/rollback 端点。
   - 已实现严格服务 scope、实际资源核对、所有权校验与幂等回滚；已提交迁移始终拒绝回滚。
 - Core 按 migration_id 的补偿端点。
-  - 仍受“Core 提交信号”待决策项阻塞；在 Core 补偿契约落地前，迁移新建 Core 用户的 rollback 保持失败关闭。
+  - 已确认由 Yggdrasil 协调器独占提交判定；Core 不增加独立 committed 标记，仅按精确的 migration ownership 补偿本次新建用户。
 - Scribe 启动扫描与恢复；首版不运行周期性恢复 worker。
   - 已实现监听前恢复、committed 完整资源清单校验后重绑、rolled_back 每次启动权威对账后清理，以及真实 Redis/SQLite 的重复启动幂等测试。
   - committed 必须逐项匹配 Core 权属与 ID、account、固定 profile 和暂存资产摘要；未知结果、缺权威结果或资源漂移时保持阻断，不创建永久绑定。
   - `ROLLING_BACK` 与 `ROLLED_BACK` 重启时均重新核对回滚清单；调用 rollback 前持久化权威 Core/account 身份，Core/account 尚未分配时允许缺省，身份变化、意外资源或旧记录缺身份时保留暂存并失败关闭。
 - 资源权属校验和告警。
-  - 自动 rollback 前核对 Core 权属、固定 profile 与暂存资产身份；迁移新建 Core 用户仍存在时失败关闭。
+  - 自动 rollback 前核对 Core 权属、固定 profile 与暂存资产身份；权威 rolled_back 后迁移新建 Core 用户必须不存在，既有 Core 用户必须仍存在，否则失败关闭。
 
 验收：
 
@@ -146,11 +146,6 @@
 - 指标标签仅包含白名单枚举，不出现 migration_id、用户名、UUID、密码、令牌或纹理 URL。
 - 过期 token 绑定不再参与路由，且启动清理可重复执行。
 
-## 待决策（暂不实现）
-
-- Core 回滚契约要求拒绝已提交迁移，但 Core 状态契约没有 `committed` 状态或提交信号。需选择由 Yggdrasil 协调器独占提交判定，还是为 Core 增加契约定义的提交信号；确定前不实现 Core 回滚端点。
-- Core 现有 `users.email` / `users.username` 没有数据库唯一索引，且软删除用户仍占唯一值。新增索引会改变公开注册与改邮箱语义，需确认历史重复数据清理及软删除策略后再实施。
-
 ## M7：灰度上线与迁移观测
 
 交付：
@@ -178,3 +173,4 @@
 - WinnerProxy 正版身份吸收。
 - 删除账号恢复。
 - UUID 重生成。
+- Core `users.email` / `users.username` 数据库唯一索引与软删除唯一性改造；本次保持现有语义。

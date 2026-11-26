@@ -178,7 +178,10 @@ func rolledBackRecoveryStatus(t *testing.T, record StagedMigration) MigrationSta
 	}
 	if identity.CoreUserID != "" {
 		status.Resources = append(status.Resources, MigrationResource{
-			Kind: "core_user", ResourceID: identity.CoreUserID, Ownership: identity.CoreUserOwnership, Present: true,
+			Kind:       "core_user",
+			ResourceID: identity.CoreUserID,
+			Ownership:  identity.CoreUserOwnership,
+			Present:    identity.CoreUserOwnership == "preexisting",
 		})
 	}
 	if identity.AccountID != "" {
@@ -397,6 +400,47 @@ func TestRecoveryCleansRollbackBeforeCoreAndAccountAllocation(t *testing.T) {
 	}
 }
 
+func TestRecoveryCleansMigrationOwnedCoreAfterRollback(t *testing.T) {
+	record := recoveryRecord(t, StateRolledBack)
+	record.RollbackIdentity = &RollbackIdentity{
+		CoreUserID:        "core-uuid",
+		CoreUserOwnership: "created_by_migration",
+		AccountID:         "42",
+	}
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: rolledBackRecoveryStatus(t, record)}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(staging.transitions, []State{StateDiscarded}) || len(staging.discards) != 1 {
+		t.Fatalf("transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+	}
+	if !reflect.DeepEqual(client.calls, []string{"reconcile"}) {
+		t.Fatalf("recovery calls = %#v", client.calls)
+	}
+}
+
+func TestRecoveryRejectsResidualMigrationOwnedCore(t *testing.T) {
+	record := recoveryRecord(t, StateRolledBack)
+	record.RollbackIdentity = &RollbackIdentity{
+		CoreUserID:        "core-uuid",
+		CoreUserOwnership: "created_by_migration",
+		AccountID:         "42",
+	}
+	status := rolledBackRecoveryStatus(t, record)
+	status.Resources[0].Present = true
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: status}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("recover() error = %v, want ErrInvalidResponse", err)
+	}
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 {
+		t.Fatalf("residual Core user was cleaned: transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+	}
+}
+
 func TestRecoveryRejectsUnexpectedResourcesForEmptyRollbackIdentity(t *testing.T) {
 	for _, resource := range []MigrationResource{
 		{Kind: "core_user", ResourceID: "core-uuid", Ownership: "preexisting", Present: true},
@@ -462,9 +506,10 @@ func TestRecoveryRollbackRequiresClearOwnership(t *testing.T) {
 		{name: "missing preexisting core", status: MigrationFailed, resources: []MigrationResource{
 			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "preexisting", Present: false},
 		}, want: ErrInvalidResponse},
-		{name: "created core remains", status: MigrationFailed, resources: []MigrationResource{
+		{name: "created core compensation", status: MigrationFailed, resources: []MigrationResource{
 			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "created_by_migration", Present: true},
-		}, want: ErrRollbackNotAllowed},
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+		}},
 		{name: "created core missing", status: MigrationFailed, resources: []MigrationResource{
 			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "created_by_migration", Present: false},
 		}, want: ErrInvalidResponse},
@@ -479,7 +524,8 @@ func TestRecoveryRollbackRequiresClearOwnership(t *testing.T) {
 				if (resource.Kind == "skin" || resource.Kind == "cape") && !resource.Present {
 					continue
 				}
-				if resource.Kind == "game_account" || resource.Kind == "profile" {
+				if resource.Kind == "game_account" || resource.Kind == "profile" ||
+					(resource.Kind == "core_user" && resource.Ownership == "created_by_migration") {
 					resource.Present = false
 				}
 				rollbackStatus.Resources = append(rollbackStatus.Resources, resource)
