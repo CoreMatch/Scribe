@@ -57,12 +57,9 @@ func TestRecoveryRepeatedStartupIsIdempotent(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				resources := []MigrationResource{
-					{Kind: "core_user", ResourceID: "core-uuid", Ownership: "preexisting", Present: true},
-					{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
-				}
-				client.reconcileStatus = MigrationStatus{MigrationID: record.MigrationID, Status: MigrationFailed, Resources: resources}
-				client.rollbackStatus = MigrationStatus{MigrationID: record.MigrationID, Status: MigrationRolledBack, Resources: resources}
+				status := rollbackOwnershipStatus(t, record)
+				client.reconcileStatus = status
+				client.rollbackStatus = rolledBackRecoveryStatus(t, record)
 			case "committed_without_result":
 				record, err = staging.Transition(ctx, record.MigrationID, record.Version, StateCommitted)
 				if err != nil {

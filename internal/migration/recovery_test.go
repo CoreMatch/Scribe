@@ -107,7 +107,50 @@ func recoveryRecord(t *testing.T, state State) StagedMigration {
 func committedRecoveryStatus(t *testing.T, record StagedMigration) MigrationStatus {
 	t.Helper()
 	result := successfulCommitResult(record, "uploaded", "uploaded")
-	return MigrationStatus{MigrationID: record.MigrationID, Status: MigrationCommitted, Result: &result}
+	coreOwnership := "created_by_migration"
+	if !result.CreatedCoreUser {
+		coreOwnership = "preexisting"
+	}
+	return MigrationStatus{
+		MigrationID: record.MigrationID,
+		Status:      MigrationCommitted,
+		Result:      &result,
+		Resources: []MigrationResource{
+			{Kind: "core_user", ResourceID: result.CoreUID, Ownership: coreOwnership, Present: true},
+			{Kind: "game_account", ResourceID: fmt.Sprintf("%d", result.AccountID), Ownership: "created_by_migration", Present: true},
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: true},
+			{Kind: "skin", ResourceID: stagedAssetHash(record.Skin), Ownership: "preexisting", Present: true},
+			{Kind: "cape", ResourceID: stagedAssetHash(record.Cape), Ownership: "preexisting", Present: true},
+		},
+	}
+}
+
+func rollbackOwnershipStatus(t *testing.T, record StagedMigration) MigrationStatus {
+	t.Helper()
+	return MigrationStatus{
+		MigrationID: record.MigrationID,
+		Status:      MigrationFailed,
+		Resources: []MigrationResource{
+			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "preexisting", Present: true},
+			{Kind: "game_account", ResourceID: "42", Ownership: "created_by_migration", Present: true},
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: true},
+			{Kind: "skin", ResourceID: stagedAssetHash(record.Skin), Ownership: "preexisting", Present: true},
+			{Kind: "cape", ResourceID: stagedAssetHash(record.Cape), Ownership: "preexisting", Present: true},
+		},
+	}
+}
+
+func rolledBackRecoveryStatus(t *testing.T, record StagedMigration) MigrationStatus {
+	t.Helper()
+	status := rollbackOwnershipStatus(t, record)
+	status.Status = MigrationRolledBack
+	for index := range status.Resources {
+		switch status.Resources[index].Kind {
+		case "game_account", "profile":
+			status.Resources[index].Present = false
+		}
+	}
+	return status
 }
 
 func newTestRecovery(staging *fakeRecoveryStaging, client *fakeRecoveryClient, bindings *fakeRecoveryBindings) *Recovery {
@@ -172,6 +215,125 @@ func TestRecoveryRejectsCommittedResultWithDrift(t *testing.T) {
 	}
 }
 
+func TestRecoveryRejectsCommittedInventoryDrift(t *testing.T) {
+	record := recoveryRecord(t, StateCommitted)
+	tests := []struct {
+		name   string
+		mutate func(*MigrationStatus)
+	}{
+		{name: "missing account", mutate: func(status *MigrationStatus) {
+			status.Resources = append(status.Resources[:1], status.Resources[2:]...)
+		}},
+		{name: "missing core user", mutate: func(status *MigrationStatus) {
+			status.Resources = status.Resources[1:]
+		}},
+		{name: "wrong core user", mutate: func(status *MigrationStatus) {
+			status.Resources[0].ResourceID = "other-core-uuid"
+		}},
+		{name: "wrong core ownership", mutate: func(status *MigrationStatus) {
+			if status.Resources[0].Ownership == "created_by_migration" {
+				status.Resources[0].Ownership = "preexisting"
+			} else {
+				status.Resources[0].Ownership = "created_by_migration"
+			}
+		}},
+		{name: "wrong account", mutate: func(status *MigrationStatus) {
+			status.Resources[1].ResourceID = "43"
+		}},
+		{name: "absent account", mutate: func(status *MigrationStatus) {
+			status.Resources[1].Present = false
+		}},
+		{name: "wrong profile", mutate: func(status *MigrationStatus) {
+			status.Resources[2].ResourceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		}},
+		{name: "absent profile", mutate: func(status *MigrationStatus) {
+			status.Resources[2].Present = false
+		}},
+		{name: "wrong skin digest", mutate: func(status *MigrationStatus) {
+			status.Resources[3].ResourceID = strings.Repeat("a", 64)
+		}},
+		{name: "unexpected resource", mutate: func(status *MigrationStatus) {
+			status.Resources = append(status.Resources, MigrationResource{Kind: "unexpected", ResourceID: "id", Ownership: "preexisting", Present: true})
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := committedRecoveryStatus(t, record)
+			tt.mutate(&status)
+			staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+			client := &fakeRecoveryClient{reconcileStatus: status}
+			bindings := &fakeRecoveryBindings{}
+			recovery := newTestRecovery(staging, client, bindings)
+			if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("recover() error = %v, want ErrInvalidResponse", err)
+			}
+			if len(staging.transitions) != 0 || len(bindings.bindCalls) != 0 || len(bindings.tokens) != 0 {
+				t.Fatal("mismatched committed inventory was bound or locked")
+			}
+		})
+	}
+}
+
+func TestRecoveryRejectsRolledBackInventoryDrift(t *testing.T) {
+	record := recoveryRecord(t, StateRolledBack)
+	tests := []struct {
+		name   string
+		mutate func(*MigrationStatus)
+	}{
+		{name: "missing core user", mutate: func(status *MigrationStatus) {
+			status.Resources = status.Resources[1:]
+		}},
+		{name: "missing account", mutate: func(status *MigrationStatus) {
+			status.Resources = append(status.Resources[:1], status.Resources[2:]...)
+		}},
+		{name: "account remains", mutate: func(status *MigrationStatus) {
+			status.Resources[1].Present = true
+		}},
+		{name: "wrong profile", mutate: func(status *MigrationStatus) {
+			status.Resources[2].ResourceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		}},
+		{name: "profile remains", mutate: func(status *MigrationStatus) {
+			status.Resources[2].Present = true
+		}},
+		{name: "wrong skin digest", mutate: func(status *MigrationStatus) {
+			status.Resources[3].ResourceID = strings.Repeat("a", 64)
+		}},
+		{name: "missing preexisting core", mutate: func(status *MigrationStatus) {
+			status.Resources[0].Present = false
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := rolledBackRecoveryStatus(t, record)
+			tt.mutate(&status)
+			staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+			client := &fakeRecoveryClient{reconcileStatus: status}
+			recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+			if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("recover() error = %v, want ErrInvalidResponse", err)
+			}
+			if len(staging.transitions) != 0 || len(staging.discards) != 0 || !reflect.DeepEqual(client.calls, []string{"reconcile"}) {
+				t.Fatalf("unsafe cleanup proceeded: transitions = %#v, discards = %#v, calls = %#v", staging.transitions, staging.discards, client.calls)
+			}
+		})
+	}
+}
+
+func TestRecoveryRevalidatesRollingBackInventoryOnRestart(t *testing.T) {
+	record := recoveryRecord(t, StateRollingBack)
+	status := rolledBackRecoveryStatus(t, record)
+	status.Resources[2].ResourceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: status}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("recover() error = %v, want ErrInvalidResponse", err)
+	}
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 || !reflect.DeepEqual(client.calls, []string{"reconcile"}) {
+		t.Fatalf("rollback restart skipped inventory validation: transitions = %#v, discards = %#v, calls = %#v", staging.transitions, staging.discards, client.calls)
+	}
+}
+
 func TestRecoveryRollbackRequiresClearOwnership(t *testing.T) {
 	record := recoveryRecord(t, StateReconciling)
 	skinHash := fmt.Sprintf("%x", sha256.Sum256(record.Skin.PNG))
@@ -212,7 +374,7 @@ func TestRecoveryRollbackRequiresClearOwnership(t *testing.T) {
 			staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
 			client := &fakeRecoveryClient{
 				reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: tt.status, Resources: tt.resources},
-				rollbackStatus:  MigrationStatus{MigrationID: record.MigrationID, Status: MigrationRolledBack},
+				rollbackStatus:  rolledBackRecoveryStatus(t, record),
 			}
 			recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
 			err := recovery.recover(context.Background(), record)
@@ -253,7 +415,7 @@ func TestRecoveryRollsBackIncompleteMigrationAndDiscardsStaging(t *testing.T) {
 	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
 	client := &fakeRecoveryClient{
 		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying},
-		rollbackStatus:  MigrationStatus{MigrationID: record.MigrationID, Status: MigrationRolledBack},
+		rollbackStatus:  rolledBackRecoveryStatus(t, record),
 	}
 	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
 	if err := recovery.recover(context.Background(), record); err != nil {
@@ -354,12 +516,12 @@ func TestRecoveryStopsBeforeLockingWhenBindingFails(t *testing.T) {
 func TestRecoveryRunCleansAlreadyRolledBackStaging(t *testing.T) {
 	record := recoveryRecord(t, StateRolledBack)
 	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
-	client := &fakeRecoveryClient{}
+	client := &fakeRecoveryClient{reconcileStatus: rolledBackRecoveryStatus(t, record)}
 	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
 	if err := recovery.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(staging.transitions, []State{StateDiscarded}) || len(staging.discards) != 1 || len(client.calls) != 0 {
+	if !reflect.DeepEqual(staging.transitions, []State{StateDiscarded}) || len(staging.discards) != 1 || !reflect.DeepEqual(client.calls, []string{"reconcile"}) {
 		t.Fatalf("transitions = %#v, discards = %#v, calls = %#v", staging.transitions, staging.discards, client.calls)
 	}
 }

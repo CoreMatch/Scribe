@@ -79,6 +79,19 @@ func (r *Recovery) recover(ctx context.Context, record StagedMigration) error {
 	case StateDiscarded:
 		return r.staging.Discard(ctx, record.MigrationID, record.Version)
 	case StateRolledBack:
+		status, err := r.client.Reconcile(ctx, record.MigrationID)
+		if err != nil {
+			return err
+		}
+		if err := validateRecoveryStatusIdentity(status, record.MigrationID); err != nil {
+			return err
+		}
+		if status.Status != MigrationRolledBack {
+			return ErrInvalidResponse
+		}
+		if err := validateRolledBackInventory(status, record); err != nil {
+			return err
+		}
 		return r.discardRecord(ctx, record)
 	case StateCommitted:
 		return r.recoverCommitted(ctx, record)
@@ -106,7 +119,7 @@ func (r *Recovery) recoverCommitted(ctx context.Context, record StagedMigration)
 	if status.Status != MigrationCommitted {
 		return ErrInvalidResponse
 	}
-	return r.completeCommitted(ctx, record, status.Result, status.LastError)
+	return r.completeCommitted(ctx, record, status)
 }
 
 func (r *Recovery) recoverActive(ctx context.Context, record StagedMigration) error {
@@ -119,7 +132,7 @@ func (r *Recovery) recoverActive(ctx context.Context, record StagedMigration) er
 	}
 	switch status.Status {
 	case MigrationCommitted:
-		return r.completeCommitted(ctx, record, status.Result, status.LastError)
+		return r.completeCommitted(ctx, record, status)
 	case MigrationRolledBack:
 		return r.finishRollback(ctx, record, status)
 	}
@@ -137,7 +150,7 @@ func (r *Recovery) recoverActive(ctx context.Context, record StagedMigration) er
 	case MigrationRolledBack:
 		return r.finishRollback(ctx, record, rolledBack)
 	case MigrationCommitted:
-		return r.completeCommitted(ctx, record, rolledBack.Result, rolledBack.LastError)
+		return r.completeCommitted(ctx, record, rolledBack)
 	default:
 		return ErrInvalidResponse
 	}
@@ -184,7 +197,7 @@ func validateRollbackOwnership(status MigrationStatus, record StagedMigration) e
 				asset = record.Cape
 			}
 			if resource.Ownership != "preexisting" || asset == nil ||
-				!strings.EqualFold(resource.ResourceID, fmt.Sprintf("%x", sha256.Sum256(asset.PNG))) {
+				!strings.EqualFold(resource.ResourceID, stagedAssetHash(asset)) {
 				return ErrInvalidResponse
 			}
 		default:
@@ -194,11 +207,133 @@ func validateRollbackOwnership(status MigrationStatus, record StagedMigration) e
 	return nil
 }
 
-func (r *Recovery) completeCommitted(ctx context.Context, record StagedMigration, result *CommitResult, lastError *MigrationError) error {
-	if result == nil || lastError != nil {
+func validateCommittedInventory(status MigrationStatus, record StagedMigration, result *CommitResult) error {
+	if result == nil || status.Result == nil || status.LastError != nil || status.Status != MigrationCommitted {
 		return ErrMigrationBlocked
 	}
 	if err := validateRecoveredCommitResult(*result, record.MigrationID); err != nil {
+		return err
+	}
+	if err := validateResourceInventory(status); err != nil {
+		return err
+	}
+	coreOwnership := "preexisting"
+	if result.CreatedCoreUser {
+		coreOwnership = "created_by_migration"
+	}
+	expected := map[string]MigrationResource{
+		"core_user":    {Kind: "core_user", Ownership: coreOwnership, Present: true},
+		"game_account": {Kind: "game_account", Ownership: "created_by_migration", Present: true},
+		"profile":      {Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: true},
+	}
+	for name, asset := range map[string]*StagedAsset{"skin": record.Skin, "cape": record.Cape} {
+		if asset != nil {
+			expected[name] = MigrationResource{Kind: name, ResourceID: stagedAssetHash(asset), Ownership: "preexisting", Present: true}
+		}
+	}
+	seen := make(map[string]struct{}, len(status.Resources))
+	for _, resource := range status.Resources {
+		kind := strings.ToLower(resource.Kind)
+		if _, duplicate := seen[kind]; duplicate {
+			return ErrInvalidResponse
+		}
+		seen[kind] = struct{}{}
+		wanted, ok := expected[kind]
+		if !ok || resource.Ownership != wanted.Ownership || resource.Present != wanted.Present {
+			return ErrInvalidResponse
+		}
+		switch kind {
+		case "core_user":
+			if resource.ResourceID == "" || !strings.EqualFold(resource.ResourceID, result.CoreUID) {
+				return ErrInvalidResponse
+			}
+		case "game_account":
+			if resource.ResourceID != fmt.Sprintf("%d", result.AccountID) {
+				return ErrInvalidResponse
+			}
+		default:
+			if !strings.EqualFold(resource.ResourceID, wanted.ResourceID) {
+				return ErrInvalidResponse
+			}
+		}
+	}
+	if len(seen) != len(expected) {
+		return ErrInvalidResponse
+	}
+	return nil
+}
+
+func validateRolledBackInventory(status MigrationStatus, record StagedMigration) error {
+	if status.Result != nil || status.LastError != nil || status.Status != MigrationRolledBack {
+		return ErrInvalidResponse
+	}
+	if err := validateResourceInventory(status); err != nil {
+		return err
+	}
+	expectedAssets := make(map[string]struct{}, 2)
+	for name, asset := range map[string]*StagedAsset{"skin": record.Skin, "cape": record.Cape} {
+		if asset != nil {
+			expectedAssets[name] = struct{}{}
+		}
+	}
+	seen := make(map[string]struct{}, len(status.Resources))
+	for _, resource := range status.Resources {
+		kind := strings.ToLower(resource.Kind)
+		if _, duplicate := seen[kind]; duplicate {
+			return ErrInvalidResponse
+		}
+		seen[kind] = struct{}{}
+		switch kind {
+		case "core_user":
+			if resource.Ownership != "preexisting" || !resource.Present || resource.ResourceID == "" {
+				return ErrInvalidResponse
+			}
+		case "game_account":
+			if resource.Ownership != "created_by_migration" || resource.Present || resource.ResourceID == "" {
+				return ErrInvalidResponse
+			}
+		case "profile":
+			if resource.Ownership != "created_by_migration" || resource.Present || !strings.EqualFold(resource.ResourceID, record.Profile.ID) {
+				return ErrInvalidResponse
+			}
+		case "skin", "cape":
+			asset := record.Skin
+			if kind == "cape" {
+				asset = record.Cape
+			}
+			if _, expected := expectedAssets[kind]; !expected || asset == nil || resource.Ownership != "preexisting" ||
+				(resource.Present && !strings.EqualFold(resource.ResourceID, stagedAssetHash(asset))) {
+				return ErrInvalidResponse
+			}
+		default:
+			return ErrInvalidResponse
+		}
+	}
+	if _, ok := seen["core_user"]; !ok {
+		return ErrInvalidResponse
+	}
+	if _, ok := seen["game_account"]; !ok {
+		return ErrInvalidResponse
+	}
+	if _, ok := seen["profile"]; !ok {
+		return ErrInvalidResponse
+	}
+	return nil
+}
+
+func stagedAssetHash(asset *StagedAsset) string {
+	if asset == nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(asset.PNG))
+}
+
+func (r *Recovery) completeCommitted(ctx context.Context, record StagedMigration, status MigrationStatus) error {
+	if status.Result == nil || status.LastError != nil {
+		return ErrMigrationBlocked
+	}
+	result := status.Result
+	if err := validateCommittedInventory(status, record, result); err != nil {
 		return err
 	}
 	if !strings.EqualFold(result.ProfileID, record.Profile.ID) || result.Session.SelectedProfile.Name != record.Profile.Name {
@@ -229,6 +364,9 @@ func (r *Recovery) completeCommitted(ctx context.Context, record StagedMigration
 }
 
 func (r *Recovery) finishRollback(ctx context.Context, record StagedMigration, status MigrationStatus) error {
+	if err := validateRolledBackInventory(status, record); err != nil {
+		return err
+	}
 	current := record
 	if current.State != StateRollingBack {
 		next, err := r.staging.ConfirmRollback(ctx, current.MigrationID, current.Version, status)
