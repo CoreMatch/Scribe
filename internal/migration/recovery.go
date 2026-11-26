@@ -184,7 +184,7 @@ func validateRollbackOwnership(status MigrationStatus, record StagedMigration) e
 		switch resource.Kind {
 		case "core_user":
 			if resource.Ownership == "created_by_migration" {
-				if !resource.Present || resource.ResourceID == "" {
+				if resource.ResourceID == "" {
 					return ErrInvalidResponse
 				}
 				continue

@@ -19,8 +19,18 @@ import (
 )
 
 func TestRecoveryStartupCleansAuthoritativeRollbackAfterLostResponse(t *testing.T) {
-	for _, ownership := range []string{"preexisting", "created_by_migration"} {
-		t.Run(ownership, func(t *testing.T) {
+	tests := []struct {
+		name         string
+		ownership    string
+		corePresent  bool
+		localPresent bool
+	}{
+		{name: "preexisting core", ownership: "preexisting", corePresent: true, localPresent: true},
+		{name: "created core before compensation", ownership: "created_by_migration", corePresent: true, localPresent: true},
+		{name: "created core after lost response", ownership: "created_by_migration", corePresent: false, localPresent: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
 			redisServer := miniredis.RunT(t)
 			redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
@@ -48,7 +58,10 @@ func TestRecoveryStartupCleansAuthoritativeRollbackAfterLostResponse(t *testing.
 				t.Fatal(err)
 			}
 			status := rollbackOwnershipStatus(t, record)
-			status.Resources[0].Ownership = ownership
+			status.Resources[0].Ownership = test.ownership
+			status.Resources[0].Present = test.corePresent
+			status.Resources[1].Present = test.localPresent
+			status.Resources[2].Present = test.localPresent
 			client := &fakeRecoveryClient{
 				reconcileStatus: status,
 				rollbackErr:     ErrUpstream,
@@ -67,7 +80,7 @@ func TestRecoveryStartupCleansAuthoritativeRollbackAfterLostResponse(t *testing.
 			if err != nil || current.State != StateReconciling || current.RollbackIdentity == nil {
 				t.Fatalf("ambiguous rollback record = %+v, %v", current, err)
 			}
-			wantIdentity := RollbackIdentity{CoreUserID: "core-uuid", CoreUserOwnership: ownership, AccountID: "42"}
+			wantIdentity := RollbackIdentity{CoreUserID: "core-uuid", CoreUserOwnership: test.ownership, AccountID: "42"}
 			if *current.RollbackIdentity != wantIdentity {
 				t.Fatalf("rollback identity = %+v, want %+v", *current.RollbackIdentity, wantIdentity)
 			}
