@@ -62,11 +62,13 @@ RECEIVED
 ```text
 STAGED / APPLYING / UNKNOWN
   -> RECONCILE
-  -> ROLLBACK_IF_NOT_COMMITTED
-  -> DISCARD_STAGING
+  -> COMMITTED_WITH_AUTHORITATIVE_RESULT -> REBIND -> LOCKED
+  -> ROLLED_BACK -> DISCARD_STAGING
+  -> NOT_COMMITTED_AND_OWNERSHIP_CLEAR -> ROLLBACK -> DISCARD_STAGING
+  -> UNKNOWN_OR_AMBIGUOUS -> BLOCK
 ```
 
-`reconcile` 是读取实际资源与迁移日志，不产生新的业务写入。`rollback` 只处理未提交迁移；已提交迁移返回冲突错误。
+`reconcile` 是读取实际资源与迁移日志，不产生新的业务写入。`rollback` 只处理未提交且权属明确的迁移；已提交迁移返回冲突错误。已提交但缺权威结果或存在资源漂移时保持阻断，不建立永久绑定。
 
 ## 资产冲突矩阵
 

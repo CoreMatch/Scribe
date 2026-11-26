@@ -71,11 +71,13 @@ RECEIVED
 ```text
 STAGED / APPLYING / UNKNOWN
   -> RECONCILE
-  -> ROLLBACK_IF_NOT_COMMITTED
-  -> DISCARD_STAGING
+  -> COMMITTED_WITH_AUTHORITATIVE_RESULT -> REBIND -> LOCKED
+  -> ROLLED_BACK -> DISCARD_STAGING
+  -> NOT_COMMITTED_AND_OWNERSHIP_CLEAR -> ROLLBACK -> DISCARD_STAGING
+  -> UNKNOWN_OR_AMBIGUOUS -> BLOCK
 ```
 
-`COMMITTED` 是终态，不允许回滚。回滚只能删除明确由该 `migration_id` 创建的资源；遇到权属不明、资源被后续修改或 Core 用户已不存在等情况时 fail closed。
+`COMMITTED` 是终态，不允许回滚。已提交但缺权威结果或存在资源漂移时保持阻断，不建立永久绑定。回滚只能删除明确由该 `migration_id` 创建的资源；遇到权属不明、资源被后续修改或 Core 用户已不存在等情况时 fail closed。
 
 ### 5. 权限边界
 
