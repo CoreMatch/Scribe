@@ -19,6 +19,7 @@ import (
 
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/circuitbreaker"
+	"github.com/corematch/scribe/internal/metrics"
 	"github.com/corematch/scribe/internal/migration"
 	"github.com/corematch/scribe/internal/protocol"
 	"github.com/corematch/scribe/internal/race"
@@ -28,6 +29,7 @@ type testGateway struct {
 	gateway *Gateway
 	store   *binding.SQLiteStore
 	handler http.Handler
+	metrics *metrics.Registry
 }
 
 type fakeMigrator struct {
@@ -106,6 +108,11 @@ func TestAuthenticateBindsNewWinnerAndNeverReraces(t *testing.T) {
 	}
 	if legacyCalls.Load() != legacyCallsBeforeRetry {
 		t.Fatalf("legacy calls = %d, want %d", legacyCalls.Load(), legacyCallsBeforeRetry)
+	}
+	metricResponse := httptest.NewRecorder()
+	env.metrics.Handler().ServeHTTP(metricResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(metricResponse.Body.String(), `scribe_authentication_decisions_total{outcome="NEW_WINS",reason="none"} 1`) {
+		t.Fatalf("authentication decision metric = %s", metricResponse.Body.String())
 	}
 }
 
@@ -774,6 +781,7 @@ func newTestGateway(t *testing.T, armorialURL, legacyURL string, intent race.Int
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	registry := metrics.New()
 	gateway, err := New(Options{
 		PublicBaseURL:   "https://auth.example.com",
 		LegacyBaseURL:   legacyURL,
@@ -787,11 +795,12 @@ func newTestGateway(t *testing.T, armorialURL, legacyURL string, intent race.Int
 			HalfOpenMaxRequests: 1,
 		},
 		MigrationIntent: intent,
+		Metrics:         registry,
 	}, store, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &testGateway{gateway: gateway, store: store, handler: gateway.Handler()}
+	return &testGateway{gateway: gateway, store: store, handler: gateway.Handler(), metrics: registry}
 }
 
 func (e *testGateway) perform(method, path, body string) *httptest.ResponseRecorder {

@@ -10,6 +10,7 @@ import (
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/config"
 	"github.com/corematch/scribe/internal/gateway"
+	"github.com/corematch/scribe/internal/metrics"
 	"github.com/corematch/scribe/internal/migration"
 	"github.com/corematch/scribe/internal/profile"
 	"github.com/corematch/scribe/internal/server"
@@ -55,7 +56,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 		}
 	}()
 
-	migrator, migrationPending, recovery, err := newMigrator(cfg, redisClient, store, log)
+	registry := metrics.New()
+	migrator, migrationPending, recovery, err := newMigrator(cfg, redisClient, store, log, registry)
 	if err != nil {
 		return err
 	}
@@ -71,6 +73,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		Circuit:          circuitbreakerSettings(cfg),
 		Migrator:         migrator,
 		MigrationPending: migrationPending,
+		Metrics:          registry,
 	}, store, log)
 	if err != nil {
 		return err
@@ -80,7 +83,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		defer cancel()
 		return checkReady(checkCtx, redisClient, store)
 	}
-	return server.New(cfg.ListenAddr, httpMux(cfg, gateway, ready), cfg.ShutdownTimeout, cfg.WriteTimeout, log).Run(ctx)
+	return server.New(cfg.ListenAddr, httpMux(cfg, gateway, ready, registry), cfg.ShutdownTimeout, cfg.WriteTimeout, log).Run(ctx)
 }
 
 func checkReady(ctx context.Context, redisClient redis.UniversalClient, store *binding.SQLiteStore) error {
@@ -104,7 +107,7 @@ func openRedis(rawURL string) (*redis.Client, error) {
 	return redis.NewClient(options), nil
 }
 
-func newMigrator(cfg config.Config, redisClient redis.UniversalClient, store *binding.SQLiteStore, log *slog.Logger) (migration.Runner, migration.PendingChecker, *migration.Recovery, error) {
+func newMigrator(cfg config.Config, redisClient redis.UniversalClient, store *binding.SQLiteStore, log *slog.Logger, registry *metrics.Registry) (migration.Runner, migration.PendingChecker, *migration.Recovery, error) {
 	profiles, err := profile.New(cfg.LegacyBaseURL, profile.Options{Timeout: cfg.RequestTimeout})
 	if err != nil {
 		return nil, nil, nil, err
@@ -130,11 +133,11 @@ func newMigrator(cfg config.Config, redisClient redis.UniversalClient, store *bi
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	service, err := migration.NewService(snapshotter, staging, committer, log)
+	service, err := migration.NewService(snapshotter, staging, committer, log, registry)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	recovery, err := migration.NewRecovery(staging, committer, store, log)
+	recovery, err := migration.NewRecovery(staging, committer, store, log, registry)
 	if err != nil {
 		return nil, nil, nil, err
 	}

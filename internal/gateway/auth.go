@@ -40,6 +40,7 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 	}
 	if !errors.Is(err, binding.ErrNotFound) {
 		g.log.Error("binding lookup failed")
+		g.metrics.AuthenticationBlocked("binding_lookup_failed")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication service temporarily unavailable.")
 		return
 	}
@@ -48,6 +49,7 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 		func(ctx context.Context) race.Result { return g.execute(ctx, binding.Armorial, r, body) },
 		func(ctx context.Context) race.Result { return g.execute(ctx, binding.Legacy, r, body) },
 	)
+	g.metrics.Authentication(string(decision.Outcome), string(decision.Reason))
 	switch decision.Outcome {
 	case race.NewWins:
 		if g.migrationPending != nil {
@@ -58,6 +60,7 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 					reason = "migration_state_unknown"
 				}
 				g.log.Info("authentication blocked", "reason", reason)
+				g.metrics.AuthenticationBlocked(reason)
 				writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
 				return
 			}
@@ -82,12 +85,14 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) migrate(w http.ResponseWriter, r *http.Request, request protocol.AuthenticateRequest, identifier string, decision race.Decision) {
 	if g.migrator == nil {
 		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "migration_unavailable")
+		g.metrics.AuthenticationBlocked("migration_unavailable")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
 		return
 	}
 	legacy, err := protocol.DecodeAuthenticateResponse(decision.Legacy.Body)
 	if err != nil || legacy.SelectedProfile == nil {
 		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "invalid_legacy_session")
+		g.metrics.AuthenticationBlocked("invalid_legacy_session")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
 		return
 	}
@@ -101,12 +106,14 @@ func (g *Gateway) migrate(w http.ResponseWriter, r *http.Request, request protoc
 	})
 	if err != nil {
 		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "migration_failed")
+		g.metrics.AuthenticationBlocked("migration_failed")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
 		return
 	}
 	result, err := migratedAuthenticationResult(migrated)
 	if err != nil {
 		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "invalid_migration_result")
+		g.metrics.AuthenticationBlocked("invalid_migration_result")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
 		return
 	}
@@ -169,12 +176,14 @@ func (g *Gateway) completeAuthentication(w http.ResponseWriter, r *http.Request,
 	if createBinding {
 		if _, err := g.store.BindIfAbsent(r.Context(), identifier, winner, migrationID); err != nil {
 			g.log.Error("permanent binding failed", "reason", "conflict_or_storage_error")
+			g.metrics.AuthenticationBlocked("permanent_binding_failed")
 			writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication could not be completed.")
 			return
 		}
 	}
 	if err := g.store.BindToken(r.Context(), response.AccessToken, identifier, winner); err != nil {
 		g.log.Error("token binding failed")
+		g.metrics.AuthenticationBlocked("token_binding_failed")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication could not be completed.")
 		return
 	}
@@ -210,6 +219,7 @@ func (g *Gateway) refresh(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := g.store.BindTokenByHash(r.Context(), response.AccessToken, bound.IdentifierHash, bound.Winner); err != nil {
 		g.log.Error("refreshed token binding failed")
+		g.metrics.AuthenticationBlocked("refreshed_token_binding_failed")
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Authentication could not be completed.")
 		return
 	}

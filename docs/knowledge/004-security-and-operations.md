@@ -58,7 +58,16 @@ Redis 是迁移暂存区，不是账号真相来源。建议：
 - migration_id、阶段、耗时、结果、目标服务、稳定错误码。
 - 不使用用户名、邮箱、UUID、密码、令牌或纹理 URL 作为高基数 metrics label。
 
-告警条件：
+## 指标
+
+- `GET /metrics` 输出 Prometheus 文本格式；生产环境应在网络层限制抓取来源。
+- `scribe_authentication_decisions_total{outcome,reason}` 记录首次认证竞速结果。
+- `scribe_authentication_blocked_total{reason}` 记录迁移门闸或绑定失败导致的阻断。
+- `scribe_migration_operations_total{result,phase}` 与 `scribe_migration_duration_seconds{result,phase}` 记录迁移结果、失败阶段和耗时。
+- `scribe_recovery_operations_total{result,state}`、`scribe_recovery_duration_seconds{result,state}` 与 `scribe_recovery_scans_total{result}` 记录启动恢复。
+- 标签值使用白名单，未知值归为 `unknown`；`migration_id` 只允许进入日志，不进入指标标签。
+
+## 告警条件
 
 - `UNKNOWN` 状态超过阈值。
 - reconcile/rollback 连续失败。

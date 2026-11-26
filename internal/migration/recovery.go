@@ -6,8 +6,10 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/corematch/scribe/internal/binding"
+	"github.com/corematch/scribe/internal/metrics"
 )
 
 type RecoveryClient interface {
@@ -32,30 +34,38 @@ type Recovery struct {
 	client   RecoveryClient
 	bindings RecoveryBindings
 	log      *slog.Logger
+	metrics  *metrics.Registry
 }
 
-func NewRecovery(staging RecoveryStaging, client RecoveryClient, bindings RecoveryBindings, log *slog.Logger) (*Recovery, error) {
+func NewRecovery(staging RecoveryStaging, client RecoveryClient, bindings RecoveryBindings, log *slog.Logger, metricsRegistry *metrics.Registry) (*Recovery, error) {
 	if staging == nil || client == nil || bindings == nil {
 		return nil, errors.New("migration recovery dependencies are required")
 	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Recovery{staging: staging, client: client, bindings: bindings, log: log}, nil
+	return &Recovery{staging: staging, client: client, bindings: bindings, log: log, metrics: metricsRegistry}, nil
 }
 
 func (r *Recovery) Run(ctx context.Context) error {
 	records, err := r.staging.List(ctx)
 	if err != nil {
+		r.metrics.RecoveryScan("failed")
 		return err
 	}
+	r.metrics.RecoveryScan("success")
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := r.recover(ctx, record); err != nil {
+		started := time.Now()
+		err := r.recover(ctx, record)
+		result := "success"
+		if err != nil {
+			result = "blocked"
 			r.log.Info("migration recovery blocked", "migration_id", record.MigrationID, "reason", "recovery_failed")
 		}
+		r.metrics.Recovery(result, string(record.State), time.Since(started))
 	}
 	return nil
 }

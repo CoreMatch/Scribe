@@ -6,10 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/corematch/scribe/internal/metrics"
 	"github.com/corematch/scribe/internal/protocol"
 )
 
@@ -124,7 +127,7 @@ func TestServiceMigratesSelectedProfileAndCommitsBeforeReturning(t *testing.T) {
 		Version:        1,
 	}}
 	committer := &fakeCommitter{result: CommitResult{MigrationID: staging.staged.MigrationID, Status: "committed"}}
-	service, err := NewService(capturer, staging, committer, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	service, err := NewService(capturer, staging, committer, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,6 +160,38 @@ func TestServiceMigratesSelectedProfileAndCommitsBeforeReturning(t *testing.T) {
 	}
 }
 
+func TestServiceRecordsMigrationMetrics(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		commitErr  error
+		wantMetric string
+	}{
+		{name: "success", wantMetric: `scribe_migration_operations_total{result="success",phase="bookkeeping"} 1`},
+		{name: "commit failure", commitErr: errors.New("upstream unavailable"), wantMetric: `scribe_migration_operations_total{result="failed",phase="commit"} 1`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			registry := metrics.New()
+			staging := &fakeStagingStore{staged: StagedMigration{
+				MigrationID: "00000000-0000-4000-8000-000000000001",
+				State:       StateStagedInRedis,
+				Version:     1,
+			}}
+			committer := &fakeCommitter{result: CommitResult{Status: "committed"}, err: test.commitErr}
+			service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil, registry)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = service.Migrate(context.Background(), Input{Identifier: "Player", Password: "secret", SelectedProfile: validServiceProfile("Player")})
+
+			response := httptest.NewRecorder()
+			registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+			if !strings.Contains(response.Body.String(), test.wantMetric) {
+				t.Fatalf("migration metric missing %q: %s", test.wantMetric, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestServiceFailureLogsExcludeCredentialsAndUpstreamDetails(t *testing.T) {
 	const password = "correct-horse-battery-staple"
 	const identifier = "sensitive-player@example.com"
@@ -170,7 +205,7 @@ func TestServiceFailureLogsExcludeCredentialsAndUpstreamDetails(t *testing.T) {
 	}}
 	upstreamDetail := errors.New(strings.Join([]string{password, identifier, accessToken, privateKey}, " "))
 	var logs bytes.Buffer
-	service, err := NewService(&fakeSnapshotCapturer{}, staging, &fakeCommitter{err: upstreamDetail}, slog.New(slog.NewTextHandler(&logs, nil)))
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, &fakeCommitter{err: upstreamDetail}, slog.New(slog.NewTextHandler(&logs, nil)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +230,7 @@ func TestServiceBlocksConcurrentApply(t *testing.T) {
 		State:       StateApplying,
 		Version:     2,
 	}}
-	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +250,7 @@ func TestServiceRetriesCommittedMigrationIdempotently(t *testing.T) {
 		State:       StateCommitted,
 		Version:     3,
 	}}
-	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +272,7 @@ func TestServiceMovesFailedCommitToReconciling(t *testing.T) {
 		State:       StateStagedInRedis,
 		Version:     1,
 	}}
-	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +303,7 @@ func TestServiceRejectsInvalidCommitInputBeforeCapture(t *testing.T) {
 			capturer := &fakeSnapshotCapturer{}
 			staging := &fakeStagingStore{}
 			committer := &fakeCommitter{}
-			service, err := NewService(capturer, staging, committer, nil)
+			service, err := NewService(capturer, staging, committer, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -297,7 +332,7 @@ func TestServiceRejectsOversizeCommitBeforeApplying(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +355,7 @@ func TestServiceReturnsCommittedResultWhenBookkeepingFails(t *testing.T) {
 		},
 		transitionErr: errors.New("redis unavailable"),
 	}
-	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +373,7 @@ func TestServiceRecordsFailedCommitAfterRequestCancellation(t *testing.T) {
 		State:       StateStagedInRedis,
 		Version:     1,
 	}}
-	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +400,7 @@ func TestServiceRecordsCommitAfterRequestCancellation(t *testing.T) {
 		State:       StateStagedInRedis,
 		Version:     1,
 	}}
-	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil)
+	service, err := NewService(&fakeSnapshotCapturer{}, staging, committer, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +421,7 @@ func TestServiceRecordsCommitAfterRequestCancellation(t *testing.T) {
 
 func TestServiceRejectsInvalidInputBeforeCapture(t *testing.T) {
 	capturer := &fakeSnapshotCapturer{}
-	service, err := NewService(capturer, &fakeStagingStore{}, &fakeCommitter{}, nil)
+	service, err := NewService(capturer, &fakeStagingStore{}, &fakeCommitter{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

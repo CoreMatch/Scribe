@@ -13,6 +13,7 @@ import (
 
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/circuitbreaker"
+	"github.com/corematch/scribe/internal/metrics"
 	"github.com/corematch/scribe/internal/migration"
 	"github.com/corematch/scribe/internal/proxy"
 	"github.com/corematch/scribe/internal/race"
@@ -29,6 +30,7 @@ type Options struct {
 	MigrationIntent  race.Intent
 	Migrator         migration.Runner
 	MigrationPending migration.PendingChecker
+	Metrics          *metrics.Registry
 }
 
 type Gateway struct {
@@ -46,6 +48,7 @@ type Gateway struct {
 	migrationIntent  race.Intent
 	migrator         migration.Runner
 	migrationPending migration.PendingChecker
+	metrics          *metrics.Registry
 	log              *slog.Logger
 }
 
@@ -125,6 +128,7 @@ func New(options Options, store binding.Store, log *slog.Logger) (*Gateway, erro
 		migrationIntent:  options.MigrationIntent,
 		migrator:         options.Migrator,
 		migrationPending: options.MigrationPending,
+		metrics:          options.Metrics,
 		log:              log,
 	}, nil
 }

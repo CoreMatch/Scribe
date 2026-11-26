@@ -6,11 +6,14 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/corematch/scribe/internal/binding"
+	"github.com/corematch/scribe/internal/metrics"
 )
 
 type fakeRecoveryStaging struct {
@@ -106,7 +109,7 @@ func committedRecoveryStatus(t *testing.T, record StagedMigration) MigrationStat
 }
 
 func newTestRecovery(staging *fakeRecoveryStaging, client *fakeRecoveryClient, bindings *fakeRecoveryBindings) *Recovery {
-	recovery, err := NewRecovery(staging, client, bindings, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	recovery, err := NewRecovery(staging, client, bindings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	if err != nil {
 		panic(err)
 	}
@@ -300,6 +303,33 @@ func TestRecoveryRunContinuesAfterPerMigrationFailure(t *testing.T) {
 	}
 }
 
+func TestRecoveryRunRecordsMetrics(t *testing.T) {
+	record := recoveryRecord(t, StateCommitted)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileErr: errors.New("armorial unavailable")}
+	registry := metrics.New()
+	recovery, err := NewRecovery(staging, client, &fakeRecoveryBindings{}, nil, registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recovery.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	for _, want := range []string{
+		`scribe_recovery_scans_total{result="success"} 1`,
+		`scribe_recovery_operations_total{result="blocked",state="COMMITTED"} 1`,
+		`scribe_recovery_duration_seconds_count{result="blocked",state="COMMITTED"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("recovery metric missing %q: %s", want, body)
+		}
+	}
+}
+
 func TestRecoveryFailureLogsExcludeUpstreamDetails(t *testing.T) {
 	const accessToken = "armorial-access-token-canary"
 	const privateKey = "-----BEGIN PRIVATE KEY-----"
@@ -307,7 +337,7 @@ func TestRecoveryFailureLogsExcludeUpstreamDetails(t *testing.T) {
 	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
 	client := &fakeRecoveryClient{reconcileErr: errors.New(accessToken + " " + privateKey)}
 	var logs bytes.Buffer
-	recovery, err := NewRecovery(staging, client, &fakeRecoveryBindings{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	recovery, err := NewRecovery(staging, client, &fakeRecoveryBindings{}, slog.New(slog.NewTextHandler(&logs, nil)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,7 +429,7 @@ func TestRecoveryRunStopsWhenContextIsCancelled(t *testing.T) {
 }
 
 func TestNewRecoveryRequiresDependencies(t *testing.T) {
-	if _, err := NewRecovery(nil, &fakeRecoveryClient{}, &fakeRecoveryBindings{}, nil); err == nil {
+	if _, err := NewRecovery(nil, &fakeRecoveryClient{}, &fakeRecoveryBindings{}, nil, nil); err == nil {
 		t.Fatal("NewRecovery() accepted nil staging")
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"crypto/tls"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +15,8 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/config"
+	"github.com/corematch/scribe/internal/gateway"
+	"github.com/corematch/scribe/internal/metrics"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -90,11 +94,40 @@ func TestNewMigratorConstructsProductionDependenciesAndRecovery(t *testing.T) {
 	}
 	defer store.Close()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	migrator, pending, recovery, err := newMigrator(cfg, redisClient, store, log)
+	registry := metrics.New()
+	migrator, pending, recovery, err := newMigrator(cfg, redisClient, store, log, registry)
 	if err != nil || migrator == nil || pending == nil || recovery == nil {
 		t.Fatalf("newMigrator() = %v, %v, %v, %v", migrator, pending, recovery, err)
 	}
 	if err := recovery.Run(context.Background()); err != nil {
 		t.Fatalf("recovery.Run() error = %v", err)
+	}
+	response := httptest.NewRecorder()
+	registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if !strings.Contains(response.Body.String(), `scribe_recovery_scans_total{result="success"} 1`) {
+		t.Fatalf("recovery metric was not recorded: %s", response.Body.String())
+	}
+}
+
+func TestHTTPMuxServesMetrics(t *testing.T) {
+	registry := metrics.New()
+	registry.Authentication("NEW_WINS", "")
+	handler := httpMux(config.Config{
+		AuthRateLimit:         1,
+		AuthBurst:             1,
+		RateLimiterMaxEntries: 16,
+		MaxRequestBody:        1024,
+	}, &gateway.Gateway{}, func() error { return nil }, registry)
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /metrics status = %d", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), `scribe_authentication_decisions_total{outcome="NEW_WINS",reason="none"} 1`) {
+		t.Fatalf("GET /metrics did not expose registry: %s", response.Body.String())
+	}
+	if response.Header().Get("X-Content-Type-Options") != "nosniff" || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("metrics security headers missing: %#v", response.Header())
 	}
 }

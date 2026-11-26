@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
+	"github.com/corematch/scribe/internal/metrics"
 	"github.com/corematch/scribe/internal/protocol"
 )
 
@@ -59,19 +61,26 @@ type Service struct {
 	committer Committer
 	newID     func() (string, error)
 	log       *slog.Logger
+	metrics   *metrics.Registry
 }
 
-func NewService(snapshots SnapshotCapturer, staging StagingStore, committer Committer, log *slog.Logger) (*Service, error) {
+func NewService(snapshots SnapshotCapturer, staging StagingStore, committer Committer, log *slog.Logger, metricsRegistry *metrics.Registry) (*Service, error) {
 	if snapshots == nil || staging == nil || committer == nil {
 		return nil, errors.New("migration snapshot, staging, and commit services are required")
 	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
-	return &Service{snapshots: snapshots, staging: staging, committer: committer, newID: randomMigrationID, log: log}, nil
+	return &Service{snapshots: snapshots, staging: staging, committer: committer, newID: randomMigrationID, log: log, metrics: metricsRegistry}, nil
 }
 
 func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
+	started := time.Now()
+	result, phase := "failed", "input"
+	defer func() {
+		s.metrics.Migration(result, phase, time.Since(started))
+	}()
+
 	identifier, err := protocol.NormalizeIdentifier(input.Identifier)
 	if err != nil {
 		return Result{}, ErrInvalidCommit
@@ -79,16 +88,19 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 	if err := validateCommitCredentials(input.SelectedProfile, input.Password); err != nil {
 		return Result{}, err
 	}
+	phase = "snapshot"
 	snapshot, err := s.snapshots.Capture(ctx, input.SelectedProfile)
 	if err != nil {
 		return Result{}, err
 	}
 	identifierDigest := sha256.Sum256([]byte(identifier))
 	identifierHash := hex.EncodeToString(identifierDigest[:])
+	phase = "id"
 	migrationID, err := s.newID()
 	if err != nil || !validMigrationID(migrationID) {
 		return Result{}, errors.New("generate migration ID failed")
 	}
+	phase = "stage"
 	staged, _, err := s.staging.Stage(ctx, migrationID, identifierHash, snapshot)
 	if err != nil {
 		return Result{}, err
@@ -100,9 +112,11 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 		LegacyUserID:         input.LegacyUserID,
 		LegacyUserProperties: input.LegacyUserProperties,
 	}
+	phase = "validate"
 	if err := s.committer.Validate(commitRequest); err != nil {
 		return Result{}, err
 	}
+	phase = "transition"
 	switch staged.State {
 	case StateStagedInRedis, StateReconciling:
 		staged, err = s.staging.Transition(ctx, staged.MigrationID, staged.Version, StateApplying)
@@ -117,6 +131,7 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 	}
 	commitRequest.Staged = staged
 	s.log.Info("migration applying", "migration_id", staged.MigrationID)
+	phase = "commit"
 	commit, err := s.committer.Commit(ctx, commitRequest)
 	bookkeepingCtx := context.WithoutCancel(ctx)
 	if err != nil {
@@ -124,9 +139,11 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 		s.log.Info("migration commit failed", "migration_id", staged.MigrationID, "reason", "upstream_or_validation")
 		return Result{}, err
 	}
+	phase = "bookkeeping"
 	if _, err := s.staging.Transition(bookkeepingCtx, staged.MigrationID, staged.Version, StateCommitted); err != nil {
 		s.log.Info("migration committed with pending bookkeeping", "migration_id", staged.MigrationID)
 	}
+	result = "success"
 	return Result{MigrationID: staged.MigrationID, Commit: commit}, nil
 }
 
