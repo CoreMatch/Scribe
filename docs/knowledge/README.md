@@ -13,6 +13,7 @@
 
 - [Scribe 运维 Runbook](../runbook.md)
 - [Prometheus 告警规则](../../deploy/alerts.yml)
+- [Grafana 迁移仪表盘](../../deploy/grafana/dashboards/scribe.json)
 
 ## 核心结论
 

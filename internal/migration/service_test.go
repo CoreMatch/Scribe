@@ -162,12 +162,15 @@ func TestServiceMigratesSelectedProfileAndCommitsBeforeReturning(t *testing.T) {
 
 func TestServiceRecordsMigrationMetrics(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		commitErr  error
-		wantMetric string
+		name              string
+		commitErr         error
+		wantMetric        string
+		wantFailureMetric string
 	}{
 		{name: "success", wantMetric: `scribe_migration_operations_total{result="success",phase="bookkeeping"} 1`},
-		{name: "commit failure", commitErr: errors.New("upstream unavailable"), wantMetric: `scribe_migration_operations_total{result="failed",phase="commit"} 1`},
+		{name: "commit failure", commitErr: errors.New("upstream unavailable"), wantMetric: `scribe_migration_operations_total{result="failed",phase="commit"} 1`, wantFailureMetric: `scribe_migration_failures_total{reason="internal",phase="commit"} 1`},
+		{name: "asset conflict", commitErr: &APIError{StatusCode: http.StatusConflict, Code: "migration_asset_conflict", Err: ErrCommitConflict}, wantMetric: `scribe_migration_operations_total{result="failed",phase="commit"} 1`, wantFailureMetric: `scribe_migration_failures_total{reason="asset_conflict",phase="commit"} 1`},
+		{name: "timeout", commitErr: context.DeadlineExceeded, wantMetric: `scribe_migration_operations_total{result="failed",phase="commit"} 1`, wantFailureMetric: `scribe_migration_failures_total{reason="timeout",phase="commit"} 1`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			registry := metrics.New()
@@ -187,6 +190,9 @@ func TestServiceRecordsMigrationMetrics(t *testing.T) {
 			registry.Handler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 			if !strings.Contains(response.Body.String(), test.wantMetric) {
 				t.Fatalf("migration metric missing %q: %s", test.wantMetric, response.Body.String())
+			}
+			if test.wantFailureMetric != "" && !strings.Contains(response.Body.String(), test.wantFailureMetric) {
+				t.Fatalf("migration failure metric missing %q: %s", test.wantFailureMetric, response.Body.String())
 			}
 		})
 	}

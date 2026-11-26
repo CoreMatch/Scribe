@@ -74,11 +74,14 @@ func NewService(snapshots SnapshotCapturer, staging StagingStore, committer Comm
 	return &Service{snapshots: snapshots, staging: staging, committer: committer, newID: randomMigrationID, log: log, metrics: metricsRegistry}, nil
 }
 
-func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
+func (s *Service) Migrate(ctx context.Context, input Input) (result Result, retErr error) {
 	started := time.Now()
-	result, phase := "failed", "input"
+	outcome, phase := "failed", "input"
 	defer func() {
-		s.metrics.Migration(result, phase, time.Since(started))
+		s.metrics.Migration(outcome, phase, time.Since(started))
+		if outcome == "failed" {
+			s.metrics.MigrationFailed(migrationFailureReason(retErr, phase), phase)
+		}
 	}()
 
 	identifier, err := protocol.NormalizeIdentifier(input.Identifier)
@@ -143,8 +146,56 @@ func (s *Service) Migrate(ctx context.Context, input Input) (Result, error) {
 	if _, err := s.staging.Transition(bookkeepingCtx, staged.MigrationID, staged.Version, StateCommitted); err != nil {
 		s.log.Info("migration committed with pending bookkeeping", "migration_id", staged.MigrationID)
 	}
-	result = "success"
+	outcome = "success"
 	return Result{MigrationID: staged.MigrationID, Commit: commit}, nil
+}
+
+func migrationFailureReason(err error, phase string) string {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case "migration_asset_conflict":
+			return "asset_conflict"
+		case "migration_credential_conflict":
+			return "credential_conflict"
+		case "migration_profile_conflict":
+			return "profile_conflict"
+		case "migration_target_not_empty":
+			return "target_not_empty"
+		case "migration_conflict":
+			return "commit_conflict"
+		}
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, ErrMigrationInProgress):
+		return "migration_in_progress"
+	case errors.Is(err, ErrMigrationBlocked):
+		return "migration_blocked"
+	case errors.Is(err, ErrCommitConflict):
+		return "commit_conflict"
+	case errors.Is(err, ErrUnauthorized), errors.Is(err, ErrForbidden):
+		return "service_auth"
+	case errors.Is(err, ErrCommitTooLarge):
+		return "payload_too_large"
+	case errors.Is(err, ErrResponseTooLarge):
+		return "response_too_large"
+	case errors.Is(err, ErrInvalidCommit):
+		return "invalid_request"
+	case errors.Is(err, ErrInvalidResponse):
+		return "invalid_response"
+	case errors.Is(err, ErrUpstream):
+		return "upstream_unavailable"
+	case phase == "snapshot":
+		return "snapshot_failed"
+	case phase == "id" || phase == "stage" || phase == "transition":
+		return "staging_failed"
+	default:
+		return "internal"
+	}
 }
 
 func randomMigrationID() (string, error) {

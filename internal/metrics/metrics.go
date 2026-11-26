@@ -33,6 +33,7 @@ type Registry struct {
 	mu                    sync.Mutex
 	authentication        map[authenticationKey]uint64
 	authenticationBlocked map[string]uint64
+	migrationFailures     map[seriesKey]uint64
 	migrations            map[seriesKey]*histogram
 	recoveries            map[seriesKey]*histogram
 	recoveryScans         map[string]uint64
@@ -42,6 +43,7 @@ func New() *Registry {
 	return &Registry{
 		authentication:        make(map[authenticationKey]uint64),
 		authenticationBlocked: make(map[string]uint64),
+		migrationFailures:     make(map[seriesKey]uint64),
 		migrations:            make(map[seriesKey]*histogram),
 		recoveries:            make(map[seriesKey]*histogram),
 		recoveryScans:         make(map[string]uint64),
@@ -68,6 +70,19 @@ func (r *Registry) AuthenticationBlocked(reason string) {
 	key := stableLabel(reason, blockedReasons)
 	r.mu.Lock()
 	r.authenticationBlocked[key]++
+	r.mu.Unlock()
+}
+
+func (r *Registry) MigrationFailed(reason, phase string) {
+	if r == nil {
+		return
+	}
+	key := seriesKey{
+		first:  stableLabel(reason, migrationFailureReasons),
+		second: stableLabel(phase, migrationPhases),
+	}
+	r.mu.Lock()
+	r.migrationFailures[key]++
 	r.mu.Unlock()
 }
 
@@ -144,6 +159,7 @@ func (r *Registry) render() string {
 	var out strings.Builder
 	writeAuthentication(&out, r.authentication)
 	writeStringCounter(&out, "scribe_authentication_blocked_total", "Authentication requests blocked by migration or binding failures.", "reason", r.authenticationBlocked)
+	writeSeriesCounter(&out, "scribe_migration_failures_total", "Migration failures by stable reason and phase.", r.migrationFailures, "reason", "phase")
 	writeHistograms(&out, "scribe_migration_operations_total", "Migration operations by result and phase.", "scribe_migration_duration_seconds", "Migration operation duration in seconds.", r.migrations, "result", "phase")
 	writeHistograms(&out, "scribe_recovery_operations_total", "Startup recovery attempts by result and initial state.", "scribe_recovery_duration_seconds", "Startup recovery attempt duration in seconds.", r.recoveries, "result", "state")
 	writeStringCounter(&out, "scribe_recovery_scans_total", "Startup migration staging scans by result.", "result", r.recoveryScans)
@@ -176,6 +192,23 @@ func writeStringCounter(out *strings.Builder, name, help, label string, values m
 	writeHelpType(out, name, help, "counter")
 	for _, key := range keys {
 		fmt.Fprintf(out, "%s{%s=%q} %d\n", name, label, key, values[key])
+	}
+}
+
+func writeSeriesCounter(out *strings.Builder, name, help string, values map[seriesKey]uint64, firstLabel, secondLabel string) {
+	keys := make([]seriesKey, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].first != keys[j].first {
+			return keys[i].first < keys[j].first
+		}
+		return keys[i].second < keys[j].second
+	})
+	writeHelpType(out, name, help, "counter")
+	for _, key := range keys {
+		fmt.Fprintf(out, "%s{%s=%q,%s=%q} %d\n", name, firstLabel, key.first, secondLabel, key.second, values[key])
 	}
 }
 
@@ -225,8 +258,14 @@ var (
 		"binding_lookup_failed": {}, "permanent_binding_failed": {}, "token_binding_failed": {},
 		"refreshed_token_binding_failed": {},
 	}
-	migrationResults = labelSet{"success": {}, "failed": {}}
-	migrationPhases  = labelSet{
+	migrationResults        = labelSet{"success": {}, "failed": {}}
+	migrationFailureReasons = labelSet{
+		"asset_conflict": {}, "credential_conflict": {}, "profile_conflict": {}, "target_not_empty": {},
+		"commit_conflict": {}, "service_auth": {}, "payload_too_large": {}, "response_too_large": {},
+		"invalid_request": {}, "invalid_response": {}, "upstream_unavailable": {}, "timeout": {}, "canceled": {},
+		"migration_in_progress": {}, "migration_blocked": {}, "snapshot_failed": {}, "staging_failed": {}, "internal": {},
+	}
+	migrationPhases = labelSet{
 		"input": {}, "snapshot": {}, "id": {}, "stage": {}, "validate": {}, "transition": {}, "commit": {}, "bookkeeping": {},
 	}
 	recoveryResults = labelSet{"success": {}, "blocked": {}}

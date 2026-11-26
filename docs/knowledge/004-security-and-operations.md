@@ -64,6 +64,7 @@ Redis 是迁移暂存区，不是账号真相来源。建议：
 - `scribe_authentication_decisions_total{outcome,reason}` 记录首次认证竞速结果。
 - `scribe_authentication_blocked_total{reason}` 记录迁移门闸或绑定失败导致的阻断。
 - `scribe_migration_operations_total{result,phase}` 与 `scribe_migration_duration_seconds{result,phase}` 记录迁移结果、失败阶段和耗时。
+- `scribe_migration_failures_total{reason,phase}` 按白名单原因区分资产、凭据、profile 冲突及超时、上游和校验失败。
 - `scribe_recovery_operations_total{result,state}`、`scribe_recovery_duration_seconds{result,state}` 与 `scribe_recovery_scans_total{result}` 记录启动恢复。
 - 标签值使用白名单，未知值归为 `unknown`；`migration_id` 只允许进入日志，不进入指标标签。
 - 告警规则见 `deploy/alerts.yml`，处置流程与演练清单见 `docs/runbook.md`。

@@ -21,6 +21,15 @@ groups:
           summary: A Scribe migration failed in phase {{ $labels.phase }}
           description: Inspect the migration log by migration_id, keep the user blocked, and use startup reconciliation before any manual cleanup.
 
+      - alert: ScribeMigrationAssetConflict
+        expr: increase(scribe_migration_failures_total{reason="asset_conflict"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: A Scribe migration encountered an asset conflict
+          description: Compare normalized RGBA pixel digests and preserve both accounts. Do not overwrite target skin or cape assets automatically.
+
       - alert: ScribeMigrationSlow
         expr: histogram_quantile(0.95, sum by (le) (rate(scribe_migration_duration_seconds_bucket[10m]))) > 55
         for: 5m

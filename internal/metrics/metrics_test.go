@@ -17,6 +17,8 @@ func TestRegistryExposesLowCardinalityMetrics(t *testing.T) {
 	registry.AuthenticationBlocked("secret-token")
 	registry.Migration("success", "commit", 1500*time.Millisecond)
 	registry.Migration("secret-token", "secret-phase", time.Second)
+	registry.MigrationFailed("asset_conflict", "commit")
+	registry.MigrationFailed("secret-token", "secret-phase")
 	registry.Recovery("blocked", "APPLYING", 2*time.Second)
 	registry.RecoveryScan("success")
 
@@ -36,6 +38,8 @@ func TestRegistryExposesLowCardinalityMetrics(t *testing.T) {
 		`scribe_authentication_blocked_total{reason="unknown"} 1`,
 		`scribe_migration_operations_total{result="success",phase="commit"} 1`,
 		`scribe_migration_operations_total{result="unknown",phase="unknown"} 1`,
+		`scribe_migration_failures_total{reason="asset_conflict",phase="commit"} 1`,
+		`scribe_migration_failures_total{reason="unknown",phase="unknown"} 1`,
 		`scribe_migration_duration_seconds_bucket{result="success",phase="commit",le="1"} 0`,
 		`scribe_migration_duration_seconds_bucket{result="success",phase="commit",le="2.5"} 1`,
 		`scribe_migration_duration_seconds_sum{result="success",phase="commit"} 1.5`,
@@ -74,6 +78,7 @@ func TestRegistrySupportsConcurrentUpdates(t *testing.T) {
 			for range observations {
 				registry.Authentication("BLOCK_RETRY", "target_state_unknown")
 				registry.Migration("failed", "snapshot", time.Millisecond)
+				registry.MigrationFailed("snapshot_failed", "snapshot")
 				registry.Recovery("blocked", "RECONCILING", time.Millisecond)
 			}
 		}()
@@ -86,6 +91,7 @@ func TestRegistrySupportsConcurrentUpdates(t *testing.T) {
 	for _, want := range []string{
 		`scribe_authentication_decisions_total{outcome="BLOCK_RETRY",reason="target_state_unknown"} 1600`,
 		`scribe_migration_operations_total{result="failed",phase="snapshot"} 1600`,
+		`scribe_migration_failures_total{reason="snapshot_failed",phase="snapshot"} 1600`,
 		`scribe_recovery_operations_total{result="blocked",state="RECONCILING"} 1600`,
 	} {
 		if !strings.Contains(body, want) {
@@ -99,6 +105,7 @@ func TestNilRegistryIsNoop(t *testing.T) {
 	registry.Authentication("NEW_WINS", "")
 	registry.AuthenticationBlocked("migration_pending")
 	registry.Migration("success", "commit", time.Second)
+	registry.MigrationFailed("internal", "input")
 	registry.Recovery("success", "LOCKED", time.Second)
 	registry.RecoveryScan("success")
 }

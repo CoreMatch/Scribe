@@ -72,7 +72,7 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 `deploy/alerts.yml` 提供以下 Prometheus 规则：
 
 - Scribe 实例不可达。
-- 迁移失败、p95 延迟过高。
+- 迁移失败、资产冲突、p95 延迟过高。
 - 启动恢复被阻断、出现 `UNKNOWN` 状态。
 - Armorial 目标状态未知导致连续阻断。
 - 迁移索引状态未知。
@@ -80,7 +80,13 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 
 启动时 Redis 扫描失败会让进程在监听 `/metrics` 前退出，因此通过 `ScribeDown` 与进程/容器退出日志发现；不能依赖本次启动中未暴露的 `scribe_recovery_scans_total{result="failed"}`。
 
-资产冲突率、Armorial 纹理端点 5xx 和签名验证失败需要结合 Armorial 侧指标告警；Scribe 当前只将相关迁移失败记录在 `result="failed"` 和对应 `phase`。
+资产冲突可通过 `scribe_migration_failures_total{reason="asset_conflict"}` 单独观测；Armorial 纹理端点 5xx 和签名验证失败仍需结合 Armorial 侧指标告警。
+
+## 迁移仪表盘
+
+`deploy/grafana/dashboards/scribe.json` 是可导入的 Grafana 仪表盘，覆盖认证决策、迁移结果与阶段、白名单失败原因（含资产冲突）、迁移 p95 耗时、阻断原因、启动恢复状态与恢复 p95 耗时。导入时选择 Prometheus 数据源，并将 `Prometheus job` 变量设置为实际的 `scribe` 抓取任务。
+
+仪表盘只使用低基数运维标签，不包含用户名、邮箱、UUID、密码、token 或 `migration_id`。启动扫描失败发生在 `/metrics` 暴露前，仍以 `ScribeDown` 和进程退出日志为准。
 
 ## 故障处置
 
