@@ -85,7 +85,7 @@ func Evaluate(target, legacy Result, intent Intent) Decision {
 			return Decision{Outcome: NoBinding, Reason: ReasonNoPlayableLegacyProfile}
 		}
 		switch intent {
-		case IntentImport:
+		case IntentUnspecified, IntentImport:
 			return Decision{Outcome: MigrateReuseCore}
 		case IntentOptOut:
 			return Decision{Outcome: BlockRetry, Reason: ReasonMigrationOptedOut}

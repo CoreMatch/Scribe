@@ -216,7 +216,7 @@ func TestMigrationBranchesFailClosedWithoutBinding(t *testing.T) {
 	}{
 		{name: "create core", armorial: `{"error":"ForbiddenOperationException"}`},
 		{name: "reuse core", armorial: authenticationBody("armorial-token", "Player", false), intent: race.IntentImport},
-		{name: "intent required", armorial: authenticationBody("armorial-token", "Player", false)},
+		{name: "reuse core defaults to import", armorial: authenticationBody("armorial-token", "Player", false)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -288,6 +288,31 @@ func TestAuthenticateMigratesLegacyUserBeforeBinding(t *testing.T) {
 	}
 	if _, err := env.store.GetBindingByToken(context.Background(), "migrated-token"); err != nil {
 		t.Fatalf("migrated token binding missing: %v", err)
+	}
+}
+
+func TestAuthenticateDefaultsProfilelessTargetToMigration(t *testing.T) {
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, authenticationBody("legacy-token", "LegacyPlayer", true))
+	}))
+	defer legacy.Close()
+	armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, authenticationBody("armorial-token", "Player", false))
+	}))
+	defer armorial.Close()
+	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+	migrator := &fakeMigrator{result: successfulMigration()}
+	env.gateway.migrator = migrator
+
+	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "migrated-token") {
+		t.Fatalf("migration response = %d %s", response.Code, response.Body.String())
+	}
+	if len(migrator.calls) != 1 {
+		t.Fatalf("migration calls = %d, want 1", len(migrator.calls))
+	}
+	if strings.Contains(response.Body.String(), "legacy-token") || strings.Contains(response.Body.String(), "armorial-token") {
+		t.Fatalf("migration response leaked an upstream token: %s", response.Body.String())
 	}
 }
 
