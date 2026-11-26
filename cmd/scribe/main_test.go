@@ -109,6 +109,22 @@ func TestNewMigratorConstructsProductionDependenciesAndRecovery(t *testing.T) {
 	}
 }
 
+func TestRunPureProxySkipsMigrationDependencies(t *testing.T) {
+	t.Setenv("SCRIBE_LISTEN_ADDR", "127.0.0.1:0")
+	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
+	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
+	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "")
+	t.Setenv("SCRIBE_REDIS_URL", "not-a-redis-url")
+	t.Setenv("SCRIBE_MIGRATION_SERVICE_TOKEN", "")
+	t.Setenv("SCRIBE_SQLITE_PATH", "/proc/scribe-do-not-open/scribe.db")
+	t.Setenv("SCRIBE_PURE_PROXY", "true")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := run(ctx, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatalf("run() error = %v", err)
+	}
+}
+
 func TestHTTPMuxServesMetrics(t *testing.T) {
 	registry := metrics.New()
 	registry.Authentication("NEW_WINS", "")

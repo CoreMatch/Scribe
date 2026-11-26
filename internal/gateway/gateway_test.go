@@ -774,6 +774,72 @@ func TestGatewayRequiresPendingCheckerWithMigrator(t *testing.T) {
 	}
 }
 
+func TestPureProxyForwardsEveryPublicRouteToLegacyWithoutMigration(t *testing.T) {
+	var legacyCalls atomic.Int32
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		legacyCalls.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("X-Upstream", "legacy")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "%s %s %s", r.Method, r.URL.RequestURI(), body)
+	}))
+	defer legacy.Close()
+	var armorialCalls atomic.Int32
+	armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		armorialCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer armorial.Close()
+
+	proxyGateway, err := New(Options{
+		PublicBaseURL:   "https://auth.example.com",
+		LegacyBaseURL:   legacy.URL,
+		ArmorialBaseURL: "://invalid",
+		RequestTimeout:  time.Second,
+		PureProxy:       true,
+		Migrator:        &fakeMigrator{},
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := proxyGateway.Handler()
+	for _, test := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{method: http.MethodGet, path: "/"},
+		{method: http.MethodPost, path: "/authserver/authenticate", body: `not-json`},
+		{method: http.MethodPost, path: "/authserver/refresh", body: `{"accessToken":"legacy-token"}`},
+		{method: http.MethodPost, path: "/authserver/validate", body: `{"accessToken":"legacy-token"}`},
+		{method: http.MethodPost, path: "/authserver/invalidate", body: `{"accessToken":"legacy-token"}`},
+		{method: http.MethodPost, path: "/authserver/signout", body: `{"username":"Player","password":"secret"}`},
+	} {
+		request := httptest.NewRequest(test.method, "https://scribe.example.com"+test.path, strings.NewReader(test.body))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || response.Header().Get("X-Upstream") != "legacy" {
+			t.Fatalf("%s %s = %d, headers=%#v", test.method, test.path, response.Code, response.Header())
+		}
+		wantBody := test.method + " " + test.path + " " + test.body
+		if response.Body.String() != wantBody {
+			t.Fatalf("%s %s body = %q, want %q", test.method, test.path, response.Body.String(), wantBody)
+		}
+		if response.Header().Get("X-Authlib-Injector-API-Location") != "https://auth.example.com" {
+			t.Fatalf("public API location was not rewritten: %#v", response.Header())
+		}
+	}
+	if legacyCalls.Load() != 6 || armorialCalls.Load() != 0 {
+		t.Fatalf("upstream calls = legacy %d, armorial %d", legacyCalls.Load(), armorialCalls.Load())
+	}
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/internal/migrations/commit", nil))
+	if response.Code != http.StatusNotFound || legacyCalls.Load() != 6 {
+		t.Fatalf("internal route = %d, legacy calls = %d", response.Code, legacyCalls.Load())
+	}
+}
+
 func newTestGateway(t *testing.T, armorialURL, legacyURL string, intent race.Intent) *testGateway {
 	t.Helper()
 	store, err := binding.OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"), 15*24*time.Hour)

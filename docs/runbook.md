@@ -52,7 +52,9 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 - `/readyz` 同时检查 Redis 与 SQLite；返回 `503` 时不要接收新迁移。
 - `/metrics` 只包含低基数聚合值；生产环境仍应在网络层限制抓取来源。
 
-启动时先执行 Redis 暂存扫描与恢复，再开始监听 HTTP。若扫描失败，进程退出；恢复单条记录失败时记录 `migration recovery blocked` 并继续处理其他记录。
+`SCRIBE_PURE_PROXY=true` 时，根接口与全部 authserver 端点直接转发到旧上游，不执行 JSON 解析、竞速、迁移或绑定路由。该模式不连接 Redis、SQLite 或 Armorial，也不执行启动恢复；`/readyz` 仅表示进程可响应。
+
+正常迁移模式下，启动时先执行 Redis 暂存扫描与恢复，再开始监听 HTTP。若扫描失败，进程退出；恢复单条记录失败时记录 `migration recovery blocked` 并继续处理其他记录。
 
 ## 正常迁移观测
 
@@ -179,9 +181,11 @@ curl -fsS -X POST \
 
 ## 紧急停止与回切
 
-M7 的配置化“纯代理模式”开关尚未实现。当前紧急操作只能停止 Scribe 并执行部署者已有的入口回切方案；停止前先保存日志、SQLite 和 Redis 状态。
+需要紧急回切时，将 `SCRIBE_PURE_PROXY=true` 注入单实例部署并重启 Scribe。该模式会把根接口与全部 authserver 端点透明转发到 `SCRIBE_LEGACY_BASE_URL`，不连接 Redis、SQLite 或 Armorial，不执行启动恢复，不读取或写入永久绑定与 token 绑定。`/readyz` 仅检查进程响应，不再表示迁移依赖健康。
 
-不得通过删除 SQLite、清空 Redis 或修改 binding 来模拟回切。已提交迁移和永久绑定必须保留，否则重新认证可能造成数据分叉。
+纯代理模式会停止所有迁移。已经迁移到 Armorial 的用户可能没有对应的旧上游账号或 token，因此只能作为紧急降级措施，不能当作无损回滚。恢复时必须设置 `SCRIBE_PURE_PROXY=false` 并重启；正常模式会先执行启动恢复，再监听 HTTP，已有永久绑定不会重新竞速。
+
+切换前后都不得删除 SQLite、清空 Redis 或修改 binding。已提交迁移和永久绑定必须保留；必要时先保存日志、数据库和 Redis 状态用于对账。
 
 ## 故障演练
 
@@ -195,6 +199,7 @@ M7 的配置化“纯代理模式”开关尚未实现。当前紧急操作只�
 | 部分回滚 | rollback 返回仍存在的迁移资源 | 不删除暂存、不宣称完成，恢复阻断指标触发告警 |
 | SQLite 绑定失败 | commit 成功后令 SQLite 写入失败 | 认证返回 `503`，不手工写 binding；恢复后启动重绑 |
 | Token 过期 | 使用短 TTL 并等待映射过期 | 旧 token 不可路由，永久 binding 保留，重新认证路由不变 |
+| 紧急纯代理 | 设置 `SCRIBE_PURE_PROXY=true` 并重启 | 所有公开请求只到旧上游；Redis/SQLite 不可用时仍可启动；切换不删除绑定或暂存 |
 | 敏感信息扫描 | 在日志与指标中加入 canary 字符串 | 日志不出现明文凭据；非白名单指标标签归为 `unknown` |
 
 演练结束后确认：无新增脏 binding、无重复 Core/profile、无遗留未知暂存、告警可触发且可从运行记录追溯到 `migration_id`。

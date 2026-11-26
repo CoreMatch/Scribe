@@ -31,6 +31,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if cfg.PureProxy {
+		return runPureProxy(ctx, cfg, log)
+	}
 	redisClient, err := openRedis(cfg.RedisURL)
 	if err != nil {
 		return err
@@ -84,6 +87,22 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return checkReady(checkCtx, redisClient, store)
 	}
 	return server.New(cfg.ListenAddr, httpMux(cfg, gateway, ready, registry), cfg.ShutdownTimeout, cfg.WriteTimeout, log).Run(ctx)
+}
+
+func runPureProxy(ctx context.Context, cfg config.Config, log *slog.Logger) error {
+	registry := metrics.New()
+	proxyGateway, err := gateway.New(gateway.Options{
+		PublicBaseURL:  cfg.PublicBaseURL,
+		LegacyBaseURL:  cfg.LegacyBaseURL,
+		RequestTimeout: cfg.RequestTimeout,
+		MaxRequestBody: cfg.MaxRequestBody,
+		PureProxy:      true,
+		Metrics:        registry,
+	}, nil, log)
+	if err != nil {
+		return err
+	}
+	return server.New(cfg.ListenAddr, httpMux(cfg, proxyGateway, nil, registry), cfg.ShutdownTimeout, cfg.WriteTimeout, log).Run(ctx)
 }
 
 func checkReady(ctx context.Context, redisClient redis.UniversalClient, store *binding.SQLiteStore) error {

@@ -17,6 +17,7 @@ type Config struct {
 	PublicBaseURL              string
 	LegacyBaseURL              string
 	ArmorialBaseURL            string
+	PureProxy                  bool
 	RedisURL                   string
 	MigrationServiceToken      string
 	MigrationTTL               time.Duration
@@ -42,6 +43,7 @@ func Load() (Config, error) {
 		PublicBaseURL:              os.Getenv("SCRIBE_PUBLIC_BASE_URL"),
 		LegacyBaseURL:              os.Getenv("SCRIBE_LEGACY_BASE_URL"),
 		ArmorialBaseURL:            os.Getenv("SCRIBE_ARMIORIAL_BASE_URL"),
+		PureProxy:                  false,
 		RedisURL:                   os.Getenv("SCRIBE_REDIS_URL"),
 		MigrationServiceToken:      os.Getenv("SCRIBE_MIGRATION_SERVICE_TOKEN"),
 		MigrationTTL:               24 * time.Hour,
@@ -62,6 +64,9 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	if cfg.PureProxy, err = boolEnv("SCRIBE_PURE_PROXY", false); err != nil {
+		return Config{}, err
+	}
 	if cfg.TokenBindingTTL, err = durationEnv("SCRIBE_TOKEN_BINDING_TTL", cfg.TokenBindingTTL); err != nil {
 		return Config{}, err
 	}
@@ -114,11 +119,13 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.ListenAddr) == "" {
 		return errors.New("SCRIBE_LISTEN_ADDR must not be empty")
 	}
-	if strings.TrimSpace(c.SQLitePath) == "" {
-		return errors.New("SCRIBE_SQLITE_PATH must not be empty")
-	}
-	if c.TokenBindingTTL < time.Second {
-		return errors.New("SCRIBE_TOKEN_BINDING_TTL must be at least one second")
+	if !c.PureProxy {
+		if strings.TrimSpace(c.SQLitePath) == "" {
+			return errors.New("SCRIBE_SQLITE_PATH must not be empty")
+		}
+		if c.TokenBindingTTL < time.Second {
+			return errors.New("SCRIBE_TOKEN_BINDING_TTL must be at least one second")
+		}
 	}
 	for _, item := range []struct {
 		name string
@@ -128,6 +135,9 @@ func (c Config) Validate() error {
 		{name: "SCRIBE_LEGACY_BASE_URL", raw: c.LegacyBaseURL},
 		{name: "SCRIBE_ARMIORIAL_BASE_URL", raw: c.ArmorialBaseURL},
 	} {
+		if c.PureProxy && item.name == "SCRIBE_ARMIORIAL_BASE_URL" {
+			continue
+		}
 		if err := validateBaseURL(item.name, item.raw); err != nil {
 			return err
 		}
@@ -141,25 +151,27 @@ func (c Config) Validate() error {
 	if c.WriteTimeout <= 0 {
 		return errors.New("SCRIBE_WRITE_TIMEOUT must be positive")
 	}
-	if c.WriteTimeout < c.MigrationTimeout {
-		return errors.New("SCRIBE_WRITE_TIMEOUT must not be shorter than SCRIBE_MIGRATION_TIMEOUT")
-	}
-	if c.MigrationTTL <= 0 {
-		return errors.New("SCRIBE_MIGRATION_TTL must be positive")
-	}
-	if c.MigrationMaxPackageBytes <= 0 {
-		return errors.New("SCRIBE_MIGRATION_MAX_PACKAGE_BYTES must be positive")
-	}
-	if c.MigrationTimeout <= 0 {
-		return errors.New("SCRIBE_MIGRATION_TIMEOUT must be positive")
-	}
-	if err := validateRedisURL(c.RedisURL); err != nil {
-		return err
-	}
-	if c.MigrationServiceToken == "" || len(c.MigrationServiceToken) > 8192 || strings.IndexFunc(c.MigrationServiceToken, func(r rune) bool {
-		return unicode.IsSpace(r) || unicode.IsControl(r)
-	}) >= 0 {
-		return errors.New("SCRIBE_MIGRATION_SERVICE_TOKEN must be nonempty and contain no whitespace or control characters")
+	if !c.PureProxy {
+		if c.WriteTimeout < c.MigrationTimeout {
+			return errors.New("SCRIBE_WRITE_TIMEOUT must not be shorter than SCRIBE_MIGRATION_TIMEOUT")
+		}
+		if c.MigrationTTL <= 0 {
+			return errors.New("SCRIBE_MIGRATION_TTL must be positive")
+		}
+		if c.MigrationMaxPackageBytes <= 0 {
+			return errors.New("SCRIBE_MIGRATION_MAX_PACKAGE_BYTES must be positive")
+		}
+		if c.MigrationTimeout <= 0 {
+			return errors.New("SCRIBE_MIGRATION_TIMEOUT must be positive")
+		}
+		if err := validateRedisURL(c.RedisURL); err != nil {
+			return err
+		}
+		if c.MigrationServiceToken == "" || len(c.MigrationServiceToken) > 8192 || strings.IndexFunc(c.MigrationServiceToken, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r)
+		}) >= 0 {
+			return errors.New("SCRIBE_MIGRATION_SERVICE_TOKEN must be nonempty and contain no whitespace or control characters")
+		}
 	}
 	if c.MaxRequestBody <= 0 {
 		return errors.New("SCRIBE_MAX_REQUEST_BODY must be positive")
@@ -221,6 +233,18 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func boolEnv(key string, fallback bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return value, nil
 }
 
 func durationEnv(key string, fallback time.Duration) (time.Duration, error) {

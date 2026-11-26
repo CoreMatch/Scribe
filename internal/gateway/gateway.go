@@ -23,6 +23,7 @@ type Options struct {
 	PublicBaseURL    string
 	LegacyBaseURL    string
 	ArmorialBaseURL  string
+	PureProxy        bool
 	RequestTimeout   time.Duration
 	MaxRequestBody   int64
 	MaxResponseBody  int64
@@ -49,13 +50,11 @@ type Gateway struct {
 	migrator         migration.Runner
 	migrationPending migration.PendingChecker
 	metrics          *metrics.Registry
+	pureProxy        bool
 	log              *slog.Logger
 }
 
 func New(options Options, store binding.Store, log *slog.Logger) (*Gateway, error) {
-	if store == nil {
-		return nil, errors.New("binding store is required")
-	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -67,15 +66,28 @@ func New(options Options, store binding.Store, log *slog.Logger) (*Gateway, erro
 	if err != nil {
 		return nil, err
 	}
+	if options.RequestTimeout <= 0 {
+		return nil, errors.New("request timeout must be positive")
+	}
+	if options.PureProxy {
+		log.Warn("starting in pure proxy mode; migration and binding routing disabled", "upstream", "legacy")
+		return &Gateway{
+			publicBaseURL: publicURL,
+			legacyBaseURL: legacyURL,
+			legacyProxy:   proxy.New(legacyURL, publicURL, options.RequestTimeout, log),
+			pureProxy:     true,
+			log:           log,
+		}, nil
+	}
+	if store == nil {
+		return nil, errors.New("binding store is required")
+	}
 	armorialURL, err := parseBaseURL(options.ArmorialBaseURL)
 	if err != nil {
 		return nil, err
 	}
 	if options.Migrator != nil && options.MigrationPending == nil {
 		return nil, errors.New("migration pending checker is required")
-	}
-	if options.RequestTimeout <= 0 {
-		return nil, errors.New("request timeout must be positive")
 	}
 	maxResponseBody := options.MaxResponseBody
 	if maxResponseBody <= 0 {
@@ -135,14 +147,29 @@ func New(options Options, store binding.Store, log *slog.Logger) (*Gateway, erro
 
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+	rootProxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.armorialProxy.ServeHTTP(w, r)
 	})
-	mux.HandleFunc("POST /authserver/authenticate", g.authenticate)
-	mux.HandleFunc("POST /authserver/refresh", g.refresh)
-	mux.HandleFunc("POST /authserver/validate", g.validate)
-	mux.HandleFunc("POST /authserver/invalidate", g.invalidate)
-	mux.HandleFunc("POST /authserver/signout", g.signout)
+	authenticate := http.HandlerFunc(g.authenticate)
+	refresh := http.HandlerFunc(g.refresh)
+	validate := http.HandlerFunc(g.validate)
+	invalidate := http.HandlerFunc(g.invalidate)
+	signout := http.HandlerFunc(g.signout)
+	if g.pureProxy {
+		legacy := http.HandlerFunc(g.legacyProxy.ServeHTTP)
+		rootProxy = legacy
+		authenticate = legacy
+		refresh = legacy
+		validate = legacy
+		invalidate = legacy
+		signout = legacy
+	}
+	mux.Handle("GET /{$}", rootProxy)
+	mux.Handle("POST /authserver/authenticate", authenticate)
+	mux.Handle("POST /authserver/refresh", refresh)
+	mux.Handle("POST /authserver/validate", validate)
+	mux.Handle("POST /authserver/invalidate", invalidate)
+	mux.Handle("POST /authserver/signout", signout)
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		writeProtocolError(w, http.StatusNotFound, "IllegalArgumentException", "Not found.")
 	})

@@ -19,11 +19,36 @@ func TestLoadRequiresUpstreamConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadEnablesPureProxyWithoutMigrationConfiguration(t *testing.T) {
+	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
+	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
+	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "")
+	t.Setenv("SCRIBE_REDIS_URL", "")
+	t.Setenv("SCRIBE_MIGRATION_SERVICE_TOKEN", "")
+	t.Setenv("SCRIBE_PURE_PROXY", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.PureProxy {
+		t.Fatal("Load() did not enable pure proxy mode")
+	}
+}
+
+func TestLoadRejectsInvalidPureProxyValue(t *testing.T) {
+	t.Setenv("SCRIBE_PURE_PROXY", "not-a-boolean")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SCRIBE_PURE_PROXY") {
+		t.Fatalf("Load() error = %v, want pure proxy boolean error", err)
+	}
+}
+
 func TestLoadReadsOverrides(t *testing.T) {
 	setMigrationEnvironment(t)
 	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
 	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
 	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "https://armorial.internal")
+	t.Setenv("SCRIBE_PURE_PROXY", "true")
 	t.Setenv("SCRIBE_UPSTREAM_TIMEOUT", "3s")
 	t.Setenv("SCRIBE_SHUTDOWN_TIMEOUT", "2s")
 	t.Setenv("SCRIBE_MAX_REQUEST_BODY", "4096")
@@ -45,6 +70,9 @@ func TestLoadReadsOverrides(t *testing.T) {
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.PureProxy {
+		t.Fatal("Load() did not enable pure proxy mode")
 	}
 	if cfg.RequestTimeout != 3*time.Second || cfg.ShutdownTimeout != 2*time.Second || cfg.MaxRequestBody != 4096 {
 		t.Fatalf("Load() overrides not applied: %+v", cfg)
