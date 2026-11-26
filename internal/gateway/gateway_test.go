@@ -714,6 +714,131 @@ func TestSignoutBlocksPendingMigration(t *testing.T) {
 	}
 }
 
+func TestSignoutWaitsForMigrationToFinish(t *testing.T) {
+	var legacySignouts atomic.Int32
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/authserver/signout" {
+			legacySignouts.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeJSON(w, http.StatusOK, authenticationBody("legacy-token", "LegacyPlayer", true))
+	}))
+	defer legacy.Close()
+	var armorialSignouts atomic.Int32
+	armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/authserver/signout" {
+			armorialSignouts.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeJSON(w, http.StatusForbidden, `{"error":"ForbiddenOperationException"}`)
+	}))
+	defer armorial.Close()
+	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+	migrationStarted := make(chan struct{})
+	releaseMigration := make(chan struct{})
+	env.gateway.migrator = migratorFunc(func(context.Context, migration.Input) (migration.Result, error) {
+		close(migrationStarted)
+		<-releaseMigration
+		return successfulMigration(), nil
+	})
+	checker := &fakePendingChecker{pending: true}
+	env.gateway.migrationPending = checker
+
+	authDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		authDone <- env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
+	}()
+	select {
+	case <-migrationStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("migration did not start")
+	}
+	signoutDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		signoutDone <- env.perform(http.MethodPost, "/authserver/signout", `{"username":"Player","password":"secret"}`)
+	}()
+	select {
+	case response := <-signoutDone:
+		t.Fatalf("signout completed during migration: %d %s", response.Code, response.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseMigration)
+
+	authResponse := <-authDone
+	if authResponse.Code != http.StatusOK {
+		t.Fatalf("authenticate = %d %s", authResponse.Code, authResponse.Body.String())
+	}
+	signoutResponse := <-signoutDone
+	if signoutResponse.Code != http.StatusNoContent || armorialSignouts.Load() != 1 || legacySignouts.Load() != 0 {
+		t.Fatalf("signout = %d, armorial signouts = %d, legacy signouts = %d", signoutResponse.Code, armorialSignouts.Load(), legacySignouts.Load())
+	}
+	if len(checker.calls) != 0 {
+		t.Fatalf("signout checked pending state before migration completed: %#v", checker.calls)
+	}
+}
+
+func TestMigrationWaitsForSignoutUpstreamCall(t *testing.T) {
+	signoutStarted := make(chan struct{})
+	releaseSignout := make(chan struct{})
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/authserver/signout" {
+			close(signoutStarted)
+			<-releaseSignout
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeJSON(w, http.StatusOK, authenticationBody("legacy-token", "LegacyPlayer", true))
+	}))
+	defer legacy.Close()
+	armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusForbidden, `{"error":"ForbiddenOperationException"}`)
+	}))
+	defer armorial.Close()
+	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+	env.gateway.migrationPending = &fakePendingChecker{}
+	migrationStarted := make(chan struct{})
+	env.gateway.migrator = migratorFunc(func(context.Context, migration.Input) (migration.Result, error) {
+		close(migrationStarted)
+		return successfulMigration(), nil
+	})
+
+	signoutDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		signoutDone <- env.perform(http.MethodPost, "/authserver/signout", `{"username":"Player","password":"secret"}`)
+	}()
+	select {
+	case <-signoutStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("legacy signout did not start")
+	}
+	authDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		authDone <- env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
+	}()
+	select {
+	case <-migrationStarted:
+		t.Fatal("migration started before signout upstream call completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseSignout)
+
+	signoutResponse := <-signoutDone
+	if signoutResponse.Code != http.StatusNoContent {
+		t.Fatalf("signout = %d %s", signoutResponse.Code, signoutResponse.Body.String())
+	}
+	authResponse := <-authDone
+	if authResponse.Code != http.StatusOK {
+		t.Fatalf("authenticate = %d %s", authResponse.Code, authResponse.Body.String())
+	}
+	select {
+	case <-migrationStarted:
+	default:
+		t.Fatal("migration did not resume after signout completed")
+	}
+}
+
 func TestSignoutWithoutPendingMigrationUsesLegacy(t *testing.T) {
 	var legacyCalls atomic.Int32
 	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

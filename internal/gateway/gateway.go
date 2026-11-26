@@ -49,6 +49,7 @@ type Gateway struct {
 	migrationIntent  race.Intent
 	migrator         migration.Runner
 	migrationPending migration.PendingChecker
+	identifierLocks  identifierLockRegistry
 	metrics          *metrics.Registry
 	pureProxy        bool
 	log              *slog.Logger

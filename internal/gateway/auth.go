@@ -6,12 +6,48 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/migration"
 	"github.com/corematch/scribe/internal/protocol"
 	"github.com/corematch/scribe/internal/race"
 )
+
+type identifierLockRegistry struct {
+	mu    sync.Mutex
+	locks map[string]*identifierLock
+}
+
+type identifierLock struct {
+	mu   sync.Mutex
+	refs int
+}
+
+func (r *identifierLockRegistry) Lock(identifier string) func() {
+	r.mu.Lock()
+	if r.locks == nil {
+		r.locks = make(map[string]*identifierLock)
+	}
+	lock := r.locks[identifier]
+	if lock == nil {
+		lock = &identifierLock{}
+		r.locks[identifier] = lock
+	}
+	lock.refs++
+	r.mu.Unlock()
+
+	lock.mu.Lock()
+	return func() {
+		lock.mu.Unlock()
+		r.mu.Lock()
+		lock.refs--
+		if lock.refs == 0 {
+			delete(r.locks, identifier)
+		}
+		r.mu.Unlock()
+	}
+}
 
 func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 	body, ok := g.readRequestBody(w, r)
@@ -83,6 +119,8 @@ func (g *Gateway) authenticate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *Gateway) migrate(w http.ResponseWriter, r *http.Request, request protocol.AuthenticateRequest, identifier string, decision race.Decision) {
+	unlock := g.identifierLocks.Lock(identifier)
+	defer unlock()
 	if g.migrator == nil {
 		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "migration_unavailable")
 		g.metrics.AuthenticationBlocked("migration_unavailable")
@@ -279,6 +317,8 @@ func (g *Gateway) signout(w http.ResponseWriter, r *http.Request) {
 		writeProtocolError(w, http.StatusBadRequest, "IllegalArgumentException", "Bad request.")
 		return
 	}
+	unlock := g.identifierLocks.Lock(identifier)
+	defer unlock()
 	winner := binding.Legacy
 	bound, err := g.store.GetBinding(r.Context(), identifier)
 	if err == nil {
