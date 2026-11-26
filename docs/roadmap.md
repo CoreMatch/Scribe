@@ -111,7 +111,7 @@
 - Scribe 启动扫描与恢复；首版不运行周期性恢复 worker。
   - 已实现监听前恢复、committed 完整资源清单校验后重绑、rolled_back 每次启动权威对账后清理，以及真实 Redis/SQLite 的重复启动幂等测试。
   - committed 必须逐项匹配 Core 权属与 ID、account、固定 profile 和暂存资产摘要；未知结果、缺权威结果或资源漂移时保持阻断，不创建永久绑定。
-  - `ROLLING_BACK` 与 `ROLLED_BACK` 重启时均重新核对回滚清单；身份或残留资源不符时保留暂存。
+  - `ROLLING_BACK` 与 `ROLLED_BACK` 重启时均重新核对回滚清单；调用 rollback 前持久化权威 Core/account 身份，Core/account 尚未分配时允许缺省，身份变化、意外资源或旧记录缺身份时保留暂存并失败关闭。
 - 资源权属校验和告警。
   - 自动 rollback 前核对 Core 权属、固定 profile 与暂存资产身份；迁移新建 Core 用户仍存在时失败关闭。
 

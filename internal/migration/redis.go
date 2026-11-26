@@ -46,16 +46,23 @@ type StagedAsset struct {
 }
 
 type StagedMigration struct {
-	MigrationID    string
-	CommitDigest   string
-	IdentifierHash string
-	Profile        protocol.Profile
-	Skin           *StagedAsset
-	Cape           *StagedAsset
-	State          State
-	Version        int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	MigrationID      string
+	CommitDigest     string
+	IdentifierHash   string
+	Profile          protocol.Profile
+	Skin             *StagedAsset
+	Cape             *StagedAsset
+	RollbackIdentity *RollbackIdentity
+	State            State
+	Version          int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+}
+
+type RollbackIdentity struct {
+	CoreUserID        string `json:"core_user_id"`
+	CoreUserOwnership string `json:"core_user_ownership"`
+	AccountID         string `json:"account_id"`
 }
 
 type RedisOptions struct {
@@ -133,6 +140,35 @@ redis.call('HSET', KEYS[1],
   'cape', ARGV[6])
 redis.call('PEXPIRE', KEYS[1], ttl)
 return 0
+`
+
+const recordRollbackIdentityScript = `
+local version = redis.call('HGET', KEYS[1], 'version')
+if not version then
+  return -1
+end
+if tonumber(version) ~= tonumber(ARGV[1]) then
+  return 0
+end
+local payload = redis.call('HGET', KEYS[1], 'payload')
+if not payload then
+  return -3
+end
+local state = redis.call('HGET', KEYS[1], 'state')
+if state ~= 'RECONCILING' and state ~= 'ROLLING_BACK' then
+  return -3
+end
+local payload_valid, decoded = pcall(cjson.decode, payload)
+if not payload_valid or type(decoded) ~= 'table' or decoded.migration_id ~= ARGV[4] then
+  return -3
+end
+local current = redis.call('HGET', KEYS[1], 'rollback_identity')
+if current and current ~= ARGV[2] then
+  return -3
+end
+redis.call('HSET', KEYS[1], 'rollback_identity', ARGV[2], 'version', tonumber(ARGV[1]) + 1, 'updated_at', ARGV[3])
+redis.call('PERSIST', KEYS[1])
+return 1
 `
 
 const transitionScript = `
@@ -235,6 +271,35 @@ func (s *RedisStore) Pending(ctx context.Context, identifier string) (bool, erro
 		return false, nil
 	}
 	return true, nil
+}
+
+func (s *RedisStore) RecordRollbackIdentity(ctx context.Context, migrationID string, expectedVersion int64, identity RollbackIdentity) (StagedMigration, error) {
+	if !validMigrationID(migrationID) || expectedVersion <= 0 {
+		return StagedMigration{}, errors.New("invalid rollback identity update")
+	}
+	if err := validateRollbackIdentity(identity); err != nil {
+		return StagedMigration{}, err
+	}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		return StagedMigration{}, ErrCorruptStaging
+	}
+	result, err := s.client.Eval(ctx, recordRollbackIdentityScript, []string{stagingKey(migrationID)}, expectedVersion, string(encoded), s.now().UTC().Format(time.RFC3339Nano), migrationID).Int64()
+	if err != nil {
+		return StagedMigration{}, err
+	}
+	switch result {
+	case -1:
+		return StagedMigration{}, ErrNotFound
+	case 0:
+		return StagedMigration{}, ErrVersionConflict
+	case -3:
+		return StagedMigration{}, ErrCorruptStaging
+	case 1:
+		return s.Load(ctx, migrationID)
+	default:
+		return StagedMigration{}, ErrCorruptStaging
+	}
 }
 
 func (s *RedisStore) Stage(ctx context.Context, migrationID, identifierHash string, snapshot Snapshot) (StagedMigration, bool, error) {
@@ -476,6 +541,16 @@ func (s *RedisStore) Load(ctx context.Context, migrationID string) (StagedMigrat
 	if err != nil {
 		return StagedMigration{}, err
 	}
+	if rawIdentity := values["rollback_identity"]; rawIdentity != "" {
+		var identity RollbackIdentity
+		if err := json.Unmarshal([]byte(rawIdentity), &identity); err != nil {
+			return StagedMigration{}, ErrCorruptStaging
+		}
+		if err := validateRollbackIdentity(identity); err != nil {
+			return StagedMigration{}, err
+		}
+		record.RollbackIdentity = &identity
+	}
 	snapshot := record.snapshot()
 	digest, err := CommitDigest(snapshot, payload.IdentifierHash)
 	if err != nil || digest != payload.CommitDigest {
@@ -654,6 +729,23 @@ func validMigrationID(id string) bool {
 		}
 	}
 	return true
+}
+
+func validateRollbackIdentity(identity RollbackIdentity) error {
+	if identity.CoreUserID == "" {
+		if identity.CoreUserOwnership != "" {
+			return ErrCorruptStaging
+		}
+	} else if identity.CoreUserOwnership != "preexisting" {
+		return ErrCorruptStaging
+	}
+	if identity.AccountID != "" {
+		accountID, err := strconv.ParseUint(identity.AccountID, 10, 64)
+		if err != nil || accountID == 0 {
+			return ErrCorruptStaging
+		}
+	}
+	return nil
 }
 
 func validState(state State) bool {

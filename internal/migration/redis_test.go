@@ -66,6 +66,66 @@ func TestRedisStageStoresAtomicCredentialFreePackage(t *testing.T) {
 	}
 }
 
+func TestRedisRecordRollbackIdentityIsAtomicAndImmutable(t *testing.T) {
+	server := miniredis.RunT(t)
+	store, client := testRedisStore(t, server, RedisOptions{TTL: time.Hour})
+	ctx := context.Background()
+	identifierHash := strings.Repeat("ab", 32)
+	record, _, err := store.Stage(ctx, testMigrationID, identifierHash, validDigestSnapshot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := RollbackIdentity{CoreUserID: "core-uuid", CoreUserOwnership: "preexisting", AccountID: "42"}
+	if _, err := store.RecordRollbackIdentity(ctx, record.MigrationID, record.Version, identity); !errors.Is(err, ErrCorruptStaging) {
+		t.Fatalf("identity recorded outside recovery: %v", err)
+	}
+	record, err = store.Transition(ctx, record.MigrationID, record.Version, StateApplying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Transition(ctx, record.MigrationID, record.Version, StateReconciling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.RecordRollbackIdentity(ctx, record.MigrationID, record.Version, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.RollbackIdentity == nil || *record.RollbackIdentity != identity || record.Version != 4 {
+		t.Fatalf("recorded identity = %+v", record)
+	}
+	for _, key := range []string{stagingKey(testMigrationID), identifierIndexKey(identifierHash)} {
+		if ttl := server.TTL(key); ttl != 0 {
+			t.Fatalf("active identity key %q expires in %v", key, ttl)
+		}
+	}
+	record, err = store.RecordRollbackIdentity(ctx, record.MigrationID, record.Version, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.RollbackIdentity == nil || *record.RollbackIdentity != identity || record.Version != 5 {
+		t.Fatalf("repeated identity = %+v", record)
+	}
+	if _, err := store.RecordRollbackIdentity(ctx, record.MigrationID, record.Version-1, identity); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale identity update error = %v", err)
+	}
+	changed := identity
+	changed.AccountID = "43"
+	if _, err := store.RecordRollbackIdentity(ctx, record.MigrationID, record.Version, changed); !errors.Is(err, ErrCorruptStaging) {
+		t.Fatalf("changed identity update error = %v", err)
+	}
+	loaded, err := store.Load(ctx, record.MigrationID)
+	if err != nil || !reflect.DeepEqual(loaded, record) {
+		t.Fatalf("identity changed after conflict: %+v, %v", loaded, err)
+	}
+	if err := client.HSet(ctx, stagingKey(testMigrationID), "rollback_identity", `{"core_user_id":"core-uuid","core_user_ownership":"created_by_migration","account_id":"42"}`).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(ctx, testMigrationID); !errors.Is(err, ErrCorruptStaging) {
+		t.Fatalf("corrupt identity load error = %v", err)
+	}
+}
+
 func TestRedisStageIsIdempotentAndRejectsDigestConflicts(t *testing.T) {
 	server := miniredis.RunT(t)
 	store, _ := testRedisStore(t, server, RedisOptions{})

@@ -21,6 +21,7 @@ type RecoveryClient interface {
 
 type RecoveryStaging interface {
 	List(context.Context) ([]StagedMigration, error)
+	RecordRollbackIdentity(context.Context, string, int64, RollbackIdentity) (StagedMigration, error)
 	Transition(context.Context, string, int64, State) (StagedMigration, error)
 	ConfirmRollback(context.Context, string, int64, MigrationStatus) (StagedMigration, error)
 	Discard(context.Context, string, int64) error
@@ -139,18 +140,26 @@ func (r *Recovery) recoverActive(ctx context.Context, record StagedMigration) er
 	if err := validateRollbackOwnership(status, record); err != nil {
 		return err
 	}
-	rolledBack, err := r.client.Rollback(ctx, record.MigrationID)
+	identity, err := rollbackIdentityFromStatus(status)
 	if err != nil {
 		return err
 	}
-	if err := validateRecoveryStatusIdentity(rolledBack, record.MigrationID); err != nil {
+	current, err := r.staging.RecordRollbackIdentity(ctx, record.MigrationID, record.Version, identity)
+	if err != nil {
+		return err
+	}
+	rolledBack, err := r.client.Rollback(ctx, current.MigrationID)
+	if err != nil {
+		return err
+	}
+	if err := validateRecoveryStatusIdentity(rolledBack, current.MigrationID); err != nil {
 		return err
 	}
 	switch rolledBack.Status {
 	case MigrationRolledBack:
-		return r.finishRollback(ctx, record, rolledBack)
+		return r.finishRollback(ctx, current, rolledBack)
 	case MigrationCommitted:
-		return r.completeCommitted(ctx, record, rolledBack)
+		return r.completeCommitted(ctx, current, rolledBack)
 	default:
 		return ErrInvalidResponse
 	}
@@ -205,6 +214,31 @@ func validateRollbackOwnership(status MigrationStatus, record StagedMigration) e
 		}
 	}
 	return nil
+}
+
+func rollbackIdentityFromStatus(status MigrationStatus) (RollbackIdentity, error) {
+	identity := RollbackIdentity{}
+	seen := make(map[string]struct{}, len(status.Resources))
+	for _, resource := range status.Resources {
+		if _, duplicate := seen[resource.Kind]; duplicate {
+			return RollbackIdentity{}, ErrInvalidResponse
+		}
+		seen[resource.Kind] = struct{}{}
+		switch resource.Kind {
+		case "core_user":
+			identity.CoreUserID = resource.ResourceID
+			identity.CoreUserOwnership = resource.Ownership
+		case "game_account":
+			identity.AccountID = resource.ResourceID
+		}
+	}
+	if err := validateRollbackIdentity(identity); err != nil {
+		return RollbackIdentity{}, ErrInvalidResponse
+	}
+	if _, ok := seen["profile"]; !ok {
+		return RollbackIdentity{}, ErrInvalidResponse
+	}
+	return identity, nil
 }
 
 func validateCommittedInventory(status MigrationStatus, record StagedMigration, result *CommitResult) error {
@@ -267,8 +301,21 @@ func validateRolledBackInventory(status MigrationStatus, record StagedMigration)
 	if status.Result != nil || status.LastError != nil || status.Status != MigrationRolledBack {
 		return ErrInvalidResponse
 	}
+	if record.RollbackIdentity == nil {
+		return ErrMigrationBlocked
+	}
 	if err := validateResourceInventory(status); err != nil {
 		return err
+	}
+	identity := *record.RollbackIdentity
+	expected := map[string]MigrationResource{
+		"profile": {Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+	}
+	if identity.CoreUserID != "" {
+		expected["core_user"] = MigrationResource{Kind: "core_user", ResourceID: identity.CoreUserID, Ownership: identity.CoreUserOwnership, Present: true}
+	}
+	if identity.AccountID != "" {
+		expected["game_account"] = MigrationResource{Kind: "game_account", ResourceID: identity.AccountID, Ownership: "created_by_migration", Present: false}
 	}
 	expectedAssets := make(map[string]struct{}, 2)
 	for name, asset := range map[string]*StagedAsset{"skin": record.Skin, "cape": record.Cape} {
@@ -283,40 +330,29 @@ func validateRolledBackInventory(status MigrationStatus, record StagedMigration)
 			return ErrInvalidResponse
 		}
 		seen[kind] = struct{}{}
-		switch kind {
-		case "core_user":
-			if resource.Ownership != "preexisting" || !resource.Present || resource.ResourceID == "" {
+		if wanted, ok := expected[kind]; ok {
+			if resource.Ownership != wanted.Ownership || resource.Present != wanted.Present ||
+				!strings.EqualFold(resource.ResourceID, wanted.ResourceID) {
 				return ErrInvalidResponse
 			}
-		case "game_account":
-			if resource.Ownership != "created_by_migration" || resource.Present || resource.ResourceID == "" {
-				return ErrInvalidResponse
-			}
-		case "profile":
-			if resource.Ownership != "created_by_migration" || resource.Present || !strings.EqualFold(resource.ResourceID, record.Profile.ID) {
-				return ErrInvalidResponse
-			}
-		case "skin", "cape":
-			asset := record.Skin
-			if kind == "cape" {
-				asset = record.Cape
-			}
-			if _, expected := expectedAssets[kind]; !expected || asset == nil || resource.Ownership != "preexisting" ||
-				(resource.Present && !strings.EqualFold(resource.ResourceID, stagedAssetHash(asset))) {
-				return ErrInvalidResponse
-			}
-		default:
+			continue
+		}
+		if kind != "skin" && kind != "cape" {
+			return ErrInvalidResponse
+		}
+		asset := record.Skin
+		if kind == "cape" {
+			asset = record.Cape
+		}
+		if _, ok := expectedAssets[kind]; !ok || asset == nil || resource.Ownership != "preexisting" ||
+			(resource.Present && !strings.EqualFold(resource.ResourceID, stagedAssetHash(asset))) {
 			return ErrInvalidResponse
 		}
 	}
-	if _, ok := seen["core_user"]; !ok {
-		return ErrInvalidResponse
-	}
-	if _, ok := seen["game_account"]; !ok {
-		return ErrInvalidResponse
-	}
-	if _, ok := seen["profile"]; !ok {
-		return ErrInvalidResponse
+	for kind := range expected {
+		if _, ok := seen[kind]; !ok {
+			return ErrInvalidResponse
+		}
 	}
 	return nil
 }

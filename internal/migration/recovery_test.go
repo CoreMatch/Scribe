@@ -19,16 +19,41 @@ import (
 )
 
 type fakeRecoveryStaging struct {
-	records        []StagedMigration
-	listErr        error
-	transitions    []State
-	discards       []string
-	failTransition State
-	discardErr     error
+	records           []StagedMigration
+	listErr           error
+	transitions       []State
+	discards          []string
+	failTransition    State
+	discardErr        error
+	recordIdentityErr error
 }
 
 func (f *fakeRecoveryStaging) List(context.Context) ([]StagedMigration, error) {
 	return f.records, f.listErr
+}
+
+func (f *fakeRecoveryStaging) RecordRollbackIdentity(_ context.Context, migrationID string, expectedVersion int64, identity RollbackIdentity) (StagedMigration, error) {
+	if f.recordIdentityErr != nil {
+		return StagedMigration{}, f.recordIdentityErr
+	}
+	if err := validateRollbackIdentity(identity); err != nil {
+		return StagedMigration{}, err
+	}
+	for i := range f.records {
+		if f.records[i].MigrationID != migrationID {
+			continue
+		}
+		if f.records[i].Version != expectedVersion {
+			return StagedMigration{}, ErrVersionConflict
+		}
+		if f.records[i].RollbackIdentity != nil && *f.records[i].RollbackIdentity != identity {
+			return StagedMigration{}, ErrCorruptStaging
+		}
+		f.records[i].RollbackIdentity = &identity
+		f.records[i].Version++
+		return f.records[i], nil
+	}
+	return StagedMigration{}, ErrNotFound
 }
 
 func (f *fakeRecoveryStaging) Transition(_ context.Context, migrationID string, _ int64, next State) (StagedMigration, error) {
@@ -101,6 +126,10 @@ func recoveryRecord(t *testing.T, state State) StagedMigration {
 	record := stagedFromSnapshot(t, testMigrationID, "LegacyPlayer", validDigestSnapshot(t))
 	record.State = state
 	record.Version = 2
+	if state == StateRolledBack || state == StateRollingBack {
+		identity := &RollbackIdentity{CoreUserID: "core-uuid", CoreUserOwnership: "preexisting", AccountID: "42"}
+		record.RollbackIdentity = identity
+	}
 	return record
 }
 
@@ -142,14 +171,26 @@ func rollbackOwnershipStatus(t *testing.T, record StagedMigration) MigrationStat
 
 func rolledBackRecoveryStatus(t *testing.T, record StagedMigration) MigrationStatus {
 	t.Helper()
-	status := rollbackOwnershipStatus(t, record)
-	status.Status = MigrationRolledBack
-	for index := range status.Resources {
-		switch status.Resources[index].Kind {
-		case "game_account", "profile":
-			status.Resources[index].Present = false
-		}
+	status := MigrationStatus{MigrationID: record.MigrationID, Status: MigrationRolledBack}
+	identity := record.RollbackIdentity
+	if identity == nil {
+		identity = &RollbackIdentity{CoreUserID: "core-uuid", CoreUserOwnership: "preexisting", AccountID: "42"}
 	}
+	if identity.CoreUserID != "" {
+		status.Resources = append(status.Resources, MigrationResource{
+			Kind: "core_user", ResourceID: identity.CoreUserID, Ownership: identity.CoreUserOwnership, Present: true,
+		})
+	}
+	if identity.AccountID != "" {
+		status.Resources = append(status.Resources, MigrationResource{
+			Kind: "game_account", ResourceID: identity.AccountID, Ownership: "created_by_migration", Present: false,
+		})
+	}
+	status.Resources = append(status.Resources,
+		MigrationResource{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+		MigrationResource{Kind: "skin", ResourceID: stagedAssetHash(record.Skin), Ownership: "preexisting", Present: true},
+		MigrationResource{Kind: "cape", ResourceID: stagedAssetHash(record.Cape), Ownership: "preexisting", Present: true},
+	)
 	return status
 }
 
@@ -280,6 +321,12 @@ func TestRecoveryRejectsRolledBackInventoryDrift(t *testing.T) {
 		name   string
 		mutate func(*MigrationStatus)
 	}{
+		{name: "wrong core user", mutate: func(status *MigrationStatus) {
+			status.Resources[0].ResourceID = "other-core-uuid"
+		}},
+		{name: "wrong account", mutate: func(status *MigrationStatus) {
+			status.Resources[1].ResourceID = "43"
+		}},
 		{name: "missing core user", mutate: func(status *MigrationStatus) {
 			status.Resources = status.Resources[1:]
 		}},
@@ -319,6 +366,60 @@ func TestRecoveryRejectsRolledBackInventoryDrift(t *testing.T) {
 	}
 }
 
+func TestRecoveryRequiresRollbackIdentityBeforeCleanup(t *testing.T) {
+	record := recoveryRecord(t, StateRolledBack)
+	record.RollbackIdentity = nil
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: rolledBackRecoveryStatus(t, record)}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrMigrationBlocked) {
+		t.Fatalf("recover() error = %v, want ErrMigrationBlocked", err)
+	}
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 || !reflect.DeepEqual(client.calls, []string{"reconcile"}) {
+		t.Fatalf("legacy rollback was cleaned without identity: transitions = %#v, discards = %#v, calls = %#v", staging.transitions, staging.discards, client.calls)
+	}
+}
+
+func TestRecoveryCleansRollbackBeforeCoreAndAccountAllocation(t *testing.T) {
+	record := recoveryRecord(t, StateRolledBack)
+	record.RollbackIdentity = &RollbackIdentity{}
+	status := MigrationStatus{MigrationID: record.MigrationID, Status: MigrationRolledBack, Resources: []MigrationResource{
+		{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+	}}
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: status}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(staging.transitions, []State{StateDiscarded}) || len(staging.discards) != 1 {
+		t.Fatalf("transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+	}
+}
+
+func TestRecoveryRejectsUnexpectedResourcesForEmptyRollbackIdentity(t *testing.T) {
+	for _, resource := range []MigrationResource{
+		{Kind: "core_user", ResourceID: "core-uuid", Ownership: "preexisting", Present: true},
+		{Kind: "game_account", ResourceID: "42", Ownership: "created_by_migration", Present: false},
+	} {
+		t.Run(resource.Kind, func(t *testing.T) {
+			record := recoveryRecord(t, StateRolledBack)
+			record.RollbackIdentity = &RollbackIdentity{}
+			status := rolledBackRecoveryStatus(t, record)
+			status.Resources = append(status.Resources, resource)
+			staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+			client := &fakeRecoveryClient{reconcileStatus: status}
+			recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+			if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
+				t.Fatalf("recover() error = %v, want ErrInvalidResponse", err)
+			}
+			if len(staging.transitions) != 0 || len(staging.discards) != 0 {
+				t.Fatalf("unexpected resource was cleaned: transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+			}
+		})
+	}
+}
+
 func TestRecoveryRevalidatesRollingBackInventoryOnRestart(t *testing.T) {
 	record := recoveryRecord(t, StateRollingBack)
 	status := rolledBackRecoveryStatus(t, record)
@@ -344,7 +445,9 @@ func TestRecoveryRollbackRequiresClearOwnership(t *testing.T) {
 		resources []MigrationResource
 		want      error
 	}{
-		{name: "empty partial inventory", status: MigrationFailed},
+		{name: "empty partial inventory", status: MigrationFailed, resources: []MigrationResource{
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+		}},
 		{name: "owned partial resources", status: MigrationFailed, resources: []MigrationResource{
 			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "preexisting", Present: true},
 			{Kind: "game_account", ResourceID: "42", Ownership: "created_by_migration", Present: true},
@@ -371,10 +474,20 @@ func TestRecoveryRollbackRequiresClearOwnership(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			rollbackStatus := MigrationStatus{MigrationID: record.MigrationID, Status: MigrationRolledBack}
+			for _, resource := range tt.resources {
+				if (resource.Kind == "skin" || resource.Kind == "cape") && !resource.Present {
+					continue
+				}
+				if resource.Kind == "game_account" || resource.Kind == "profile" {
+					resource.Present = false
+				}
+				rollbackStatus.Resources = append(rollbackStatus.Resources, resource)
+			}
 			staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
 			client := &fakeRecoveryClient{
 				reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: tt.status, Resources: tt.resources},
-				rollbackStatus:  rolledBackRecoveryStatus(t, record),
+				rollbackStatus:  rollbackStatus,
 			}
 			recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
 			err := recovery.recover(context.Background(), record)
@@ -414,8 +527,12 @@ func TestRecoveryRollsBackIncompleteMigrationAndDiscardsStaging(t *testing.T) {
 	record := recoveryRecord(t, StateReconciling)
 	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
 	client := &fakeRecoveryClient{
-		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying},
-		rollbackStatus:  rolledBackRecoveryStatus(t, record),
+		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying, Resources: []MigrationResource{
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+		}},
+		rollbackStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationRolledBack, Resources: []MigrationResource{
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+		}},
 	}
 	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
 	if err := recovery.recover(context.Background(), record); err != nil {
@@ -430,11 +547,65 @@ func TestRecoveryRollsBackIncompleteMigrationAndDiscardsStaging(t *testing.T) {
 	}
 }
 
+func TestRecoveryIdentityPersistenceFailurePreventsRollback(t *testing.T) {
+	for _, persistenceErr := range []error{ErrVersionConflict, ErrCorruptStaging, errors.New("redis unavailable")} {
+		t.Run(persistenceErr.Error(), func(t *testing.T) {
+			record := recoveryRecord(t, StateReconciling)
+			staging := &fakeRecoveryStaging{records: []StagedMigration{record}, recordIdentityErr: persistenceErr}
+			client := &fakeRecoveryClient{
+				reconcileStatus: rollbackOwnershipStatus(t, record),
+				rollbackStatus:  rolledBackRecoveryStatus(t, record),
+			}
+			recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+			if err := recovery.recover(context.Background(), record); !errors.Is(err, persistenceErr) {
+				t.Fatalf("recover() error = %v, want %v", err, persistenceErr)
+			}
+			if !reflect.DeepEqual(client.calls, []string{"reconcile"}) || len(staging.transitions) != 0 || len(staging.discards) != 0 {
+				t.Fatalf("rollback crossed persistence barrier: calls = %#v, transitions = %#v, discards = %#v", client.calls, staging.transitions, staging.discards)
+			}
+		})
+	}
+}
+
+func TestRecoveryRetainsIdentityAfterLostRollbackResponse(t *testing.T) {
+	record := recoveryRecord(t, StateReconciling)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{
+		reconcileStatus: rollbackOwnershipStatus(t, record),
+		rollbackStatus:  rolledBackRecoveryStatus(t, record),
+		rollbackErr:     ErrUpstream,
+	}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrUpstream) {
+		t.Fatalf("recover() error = %v, want ErrUpstream", err)
+	}
+	current := staging.records[0]
+	if current.RollbackIdentity == nil || *current.RollbackIdentity != (RollbackIdentity{CoreUserID: "core-uuid", CoreUserOwnership: "preexisting", AccountID: "42"}) {
+		t.Fatalf("rollback identity was not retained: %+v", current)
+	}
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 {
+		t.Fatalf("ambiguous rollback changed staging: transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+	}
+	client.rollbackErr = nil
+	client.reconcileStatus = rolledBackRecoveryStatus(t, current)
+	if err := recovery.recover(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(staging.transitions, []State{StateRollingBack, StateRolledBack, StateDiscarded}) || len(staging.discards) != 1 {
+		t.Fatalf("restart transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+	}
+	if !reflect.DeepEqual(client.calls, []string{"reconcile", "rollback", "reconcile"}) {
+		t.Fatalf("restart calls = %#v", client.calls)
+	}
+}
+
 func TestRecoveryRejectsRollbackWithResidualResources(t *testing.T) {
 	record := recoveryRecord(t, StateReconciling)
 	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
 	client := &fakeRecoveryClient{
-		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying},
+		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying, Resources: []MigrationResource{
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+		}},
 		rollbackStatus: MigrationStatus{
 			MigrationID: record.MigrationID,
 			Status:      MigrationRolledBack,
@@ -450,8 +621,8 @@ func TestRecoveryRejectsRollbackWithResidualResources(t *testing.T) {
 	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
 		t.Fatalf("recover() error = %v", err)
 	}
-	if len(staging.transitions) != 0 || len(staging.discards) != 0 {
-		t.Fatalf("transitions = %#v, discards = %#v", staging.transitions, staging.discards)
+	if len(staging.transitions) != 0 || len(staging.discards) != 0 || !reflect.DeepEqual(client.calls, []string{"reconcile", "rollback"}) {
+		t.Fatalf("transitions = %#v, discards = %#v, calls = %#v", staging.transitions, staging.discards, client.calls)
 	}
 }
 
@@ -627,8 +798,10 @@ func TestRecoveryRollbackConflictPreservesStaging(t *testing.T) {
 	record := recoveryRecord(t, StateReconciling)
 	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
 	client := &fakeRecoveryClient{
-		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying},
-		rollbackErr:     ErrRollbackNotAllowed,
+		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying, Resources: []MigrationResource{
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+		}},
+		rollbackErr: ErrRollbackNotAllowed,
 	}
 	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
 	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrRollbackNotAllowed) {
@@ -643,8 +816,10 @@ func TestRecoveryRejectsUnknownRollbackResult(t *testing.T) {
 	record := recoveryRecord(t, StateReconciling)
 	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
 	client := &fakeRecoveryClient{
-		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying},
-		rollbackStatus:  MigrationStatus{MigrationID: record.MigrationID, Status: MigrationUnknown},
+		reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationApplying, Resources: []MigrationResource{
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: false},
+		}},
+		rollbackStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationUnknown},
 	}
 	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
 	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {

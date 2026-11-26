@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +17,67 @@ import (
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/redis/go-redis/v9"
 )
+
+func TestRecoveryStartupCleansAuthoritativeRollbackAfterLostResponse(t *testing.T) {
+	ctx := context.Background()
+	redisServer := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	staging, err := NewRedisStore(redisClient, RedisOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings, err := binding.OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"), 15*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bindings.Close() })
+	identifierHash := strings.Repeat("ab", 32)
+	record, created, err := staging.Stage(ctx, testMigrationID, identifierHash, validDigestSnapshot(t))
+	if err != nil || !created {
+		t.Fatalf("Stage() = %+v, %v, %v", record, created, err)
+	}
+	record, err = staging.Transition(ctx, record.MigrationID, record.Version, StateApplying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err = staging.Transition(ctx, record.MigrationID, record.Version, StateReconciling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeRecoveryClient{
+		reconcileStatus: rollbackOwnershipStatus(t, record),
+		rollbackErr:     ErrUpstream,
+	}
+	runStartup := func() error {
+		recovery, err := NewRecovery(staging, client, bindings, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+		if err != nil {
+			return err
+		}
+		return recovery.Run(ctx)
+	}
+	if err := runStartup(); err != nil {
+		t.Fatal(err)
+	}
+	current, err := staging.Load(ctx, record.MigrationID)
+	if err != nil || current.State != StateReconciling || current.RollbackIdentity == nil {
+		t.Fatalf("ambiguous rollback record = %+v, %v", current, err)
+	}
+	client.reconcileStatus = rolledBackRecoveryStatus(t, current)
+	client.rollbackErr = nil
+	if err := runStartup(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := staging.Load(ctx, record.MigrationID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("authoritatively rolled-back staging still exists: %v", err)
+	}
+	if !reflect.DeepEqual(client.calls, []string{"reconcile", "rollback", "reconcile"}) {
+		t.Fatalf("recovery calls = %#v", client.calls)
+	}
+	if _, err := bindings.GetBinding(ctx, "LegacyPlayer"); !errors.Is(err, binding.ErrNotFound) {
+		t.Fatalf("rolled-back migration created a binding: %v", err)
+	}
+}
 
 func TestRecoveryRepeatedStartupIsIdempotent(t *testing.T) {
 	for _, scenario := range []string{"committed", "rolled_back", "committed_without_result"} {
