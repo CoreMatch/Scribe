@@ -104,7 +104,9 @@
 交付：
 
 - Armorial reconcile/rollback 端点。
+  - 已实现严格服务 scope、实际资源核对、所有权校验与幂等回滚；已提交迁移始终拒绝回滚。
 - Core 按 migration_id 的补偿端点。
+  - 仍受“Core 提交信号”待决策项阻塞；在 Core 补偿契约落地前，迁移新建 Core 用户的 rollback 保持失败关闭。
 - Scribe 启动扫描与恢复；首版不运行周期性恢复 worker。
 - 资源权属校验和告警。
 

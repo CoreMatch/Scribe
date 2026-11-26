@@ -142,8 +142,9 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 1. 保持用户阻断，signout 不解除阻断。
 2. 记录日志中的 `migration_id`，通过 Armorial reconcile 获取权威状态。
 3. 若已提交，等待启动恢复完成 Armorial 绑定并进入 `LOCKED`。
-4. 若未提交且资源权属明确，由 Armorial rollback 清理本次创建的资源。
-5. 若权属不明或状态未知，停止自动回滚并告警。
+4. 若未提交且资源权属明确，由 Armorial rollback 清理本次创建的本地资源；既有 Core 账号始终保留。
+5. 若迁移创建了 Core 用户，Core 补偿契约落地前 Armorial 会以 `migration_rollback_not_allowed` 拒绝回滚，必须保持阻断并告警，不得手工删除 Core 用户。
+6. 若权属不明或状态未知，停止自动回滚并告警。
 
 ### 资产冲突
 
