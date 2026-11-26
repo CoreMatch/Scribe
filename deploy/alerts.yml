@@ -1,0 +1,78 @@
+groups:
+  - name: scribe-availability
+    rules:
+      - alert: ScribeDown
+        expr: up{job="scribe"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Scribe is unreachable by Prometheus
+          description: Check the single Scribe instance, its listener, and dependency health. Do not run a second instance against the same SQLite file.
+
+  - name: scribe-migration
+    rules:
+      - alert: ScribeMigrationFailed
+        expr: increase(scribe_migration_operations_total{result="failed"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: A Scribe migration failed in phase {{ $labels.phase }}
+          description: Inspect the migration log by migration_id, keep the user blocked, and use startup reconciliation before any manual cleanup.
+
+      - alert: ScribeMigrationSlow
+        expr: histogram_quantile(0.95, sum by (le) (rate(scribe_migration_duration_seconds_bucket[10m]))) > 55
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Scribe migration p95 latency exceeds 55 seconds
+          description: Check Armorial commit latency, legacy profile capture, texture download, and Redis before increasing timeouts.
+
+      - alert: ScribeRecoveryBlocked
+        expr: increase(scribe_recovery_operations_total{result="blocked"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Scribe startup recovery is blocked for state {{ $labels.state }}
+          description: Preserve Redis staging and SQLite bindings. Reconcile with Armorial and only roll back resources proven to belong to the migration.
+
+      - alert: ScribeUnknownMigrationState
+        expr: increase(scribe_recovery_operations_total{state="UNKNOWN"}[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Scribe observed an UNKNOWN migration state
+          description: Keep signout blocked and obtain an authoritative Armorial reconcile result. Never guess whether the migration committed.
+
+  - name: scribe-authentication
+    rules:
+      - alert: ScribeTargetStateUnknown
+        expr: increase(scribe_authentication_decisions_total{outcome="BLOCK_RETRY",reason="target_state_unknown"}[5m]) > 3
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Scribe is repeatedly blocking on unknown Armorial state
+          description: Check Armorial availability, TLS, latency, and response validity. No permanent binding should be created while target state is unknown.
+
+      - alert: ScribeMigrationGateBlocked
+        expr: increase(scribe_authentication_blocked_total{reason="migration_state_unknown"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Scribe blocked authentication because migration state was unknown
+          description: Inspect the identifier-indexed Redis migration and run authoritative reconciliation. Do not delete the index or staging record manually.
+
+      - alert: ScribeBindingFailure
+        expr: increase(scribe_authentication_blocked_total{reason=~"binding_lookup_failed|permanent_binding_failed|token_binding_failed|refreshed_token_binding_failed"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: Scribe binding operation failed for reason {{ $labels.reason }}
+          description: Check SQLite health, volume integrity, and lock contention. Preserve the database; committed migrations can be rebound by startup recovery.

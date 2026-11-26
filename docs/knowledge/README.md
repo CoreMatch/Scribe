@@ -9,6 +9,11 @@
 3. [竞速与迁移协议](003-migration-protocol.md)
 4. [安全与运行约束](004-security-and-operations.md)
 
+## 运行文档
+
+- [Scribe 运维 Runbook](../runbook.md)
+- [Prometheus 告警规则](../../deploy/alerts.yml)
+
 ## 核心结论
 
 - Scribe 是惰性迁移中间层，不改变启动器 API Root 配置。

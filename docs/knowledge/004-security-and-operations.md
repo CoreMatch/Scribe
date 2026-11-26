@@ -66,6 +66,7 @@ Redis 是迁移暂存区，不是账号真相来源。建议：
 - `scribe_migration_operations_total{result,phase}` 与 `scribe_migration_duration_seconds{result,phase}` 记录迁移结果、失败阶段和耗时。
 - `scribe_recovery_operations_total{result,state}`、`scribe_recovery_duration_seconds{result,state}` 与 `scribe_recovery_scans_total{result}` 记录启动恢复。
 - 标签值使用白名单，未知值归为 `unknown`；`migration_id` 只允许进入日志，不进入指标标签。
+- 告警规则见 `deploy/alerts.yml`，处置流程与演练清单见 `docs/runbook.md`。
 
 ## 告警条件
 

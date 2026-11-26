@@ -143,6 +143,8 @@ Scribe 不调用 `/admin/force-bind`，不吸收 WinnerProxy 正版身份，不�
 ## 关联文档
 
 - 项目知识库：`docs/knowledge/README.md`
+- 运维 Runbook：`docs/runbook.md`
+- Prometheus 告警规则：`deploy/alerts.yml`
 - Roadmap：`docs/roadmap.md`
 - 权威契约：`/home/lnb/Desktop/HA/HA-Contract/docs/api/openapi/hrpauth-yggdrasil-business.yaml`
 - 外部协议标准：`/home/lnb/Desktop/HA/HA-Contract/docs/references/`
