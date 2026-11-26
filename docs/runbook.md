@@ -30,7 +30,7 @@
 7. 确认 `SCRIBE_WRITE_TIMEOUT` 不小于 `SCRIBE_MIGRATION_TIMEOUT`。
 8. 确认 Armorial commit 内部复用正常材质管线，并返回迁移后的权威会话与 user 信息。
 9. 确认 Prometheus 可从受信任网络抓取 `/metrics`，并按实际环境修改 `deploy/alerts.yml` 的 `job="scribe"` 标签。
-10. 执行 `make verify`，并在预发布环境完成本文末尾的故障演练。
+10. 执行 `make verify`；发布机另执行 `make verify-container`，验证 Compose 结构、镜像构建、只读非 root 运行、纯代理转发与日志脱敏，并在预发布环境完成本文末尾的故障演练。该检查需要 Docker Compose、OpenSSL、Python 3 与 curl，不使用真实凭据。
 
 ## 启动与健康检查
 

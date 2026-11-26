@@ -136,7 +136,7 @@
 - 指标、日志脱敏与告警。
   - `/metrics` 已提供认证竞速、阻断、迁移阶段/耗时和启动恢复指标；`deploy/alerts.yml` 提供告警规则。
 - 运维 runbook 和故障演练。
-  - `docs/runbook.md` 提供上线检查、故障处置、启动恢复和演练清单；预发布环境演练仍需执行。
+  - `docs/runbook.md` 提供上线检查、故障处置、启动恢复和演练清单；`make verify-container` 提供无凭据的 Compose/镜像/纯代理冒烟检查；预发布环境演练仍需执行。
 
 验收：
 
