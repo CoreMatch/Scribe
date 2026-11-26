@@ -11,7 +11,8 @@
 - Armorial 在迁移提交内部复用正常材质管线并负责签名与公共纹理 URL；Scribe 不代理纹理或维护签名私钥。
 - 首版只在启动时恢复迁移；token 摘要绑定按可配置保留期清理。
 - `/metrics` 暴露低基数认证、迁移和恢复指标，标签白名单之外的统一归为 `unknown`。
-- 迁移结果未明确前 signout 保持阻断。
+- 迁移结果未明确前 signout 保持阻断，并与同一规范化 identifier 的迁移快照、提交和路由窗口串行。
+- authenticate 与 signout 使用独立的按来源 IP 限流桶；signout 超限返回标准 `429 TooManyRequestsException`。
 
 ## M0：契约冻结与设计评审
 
@@ -108,8 +109,9 @@
 - Core 按 migration_id 的补偿端点。
   - 仍受“Core 提交信号”待决策项阻塞；在 Core 补偿契约落地前，迁移新建 Core 用户的 rollback 保持失败关闭。
 - Scribe 启动扫描与恢复；首版不运行周期性恢复 worker。
-  - 已实现监听前恢复、 committed 结果重绑、 rollback 后清理，以及真实 Redis/SQLite 的重复启动幂等测试。
-  - 未知结果、权属不明、已提交但缺权威结果或存在资源漂移时保持阻断，不创建永久绑定。
+  - 已实现监听前恢复、committed 完整资源清单校验后重绑、rolled_back 每次启动权威对账后清理，以及真实 Redis/SQLite 的重复启动幂等测试。
+  - committed 必须逐项匹配 Core 权属与 ID、account、固定 profile 和暂存资产摘要；未知结果、缺权威结果或资源漂移时保持阻断，不创建永久绑定。
+  - `ROLLING_BACK` 与 `ROLLED_BACK` 重启时均重新核对回滚清单；身份或残留资源不符时保留暂存。
 - 资源权属校验和告警。
   - 自动 rollback 前核对 Core 权属、固定 profile 与暂存资产身份；迁移新建 Core 用户仍存在时失败关闭。
 
@@ -128,6 +130,7 @@
 交付：
 
 - TLS、证书校验、限流与资源预算。
+  - authenticate 与 signout 分别使用独立限流桶，密钥只取直接连接来源 IP，不信任请求头代理地址。
 - Redis ACL/TLS/TTL。
 - token 摘要绑定保留期与启动清理。
 - 指标、日志脱敏与告警。

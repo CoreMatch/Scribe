@@ -13,6 +13,8 @@
 - Redis 是迁移暂存区，不是账号真相来源；不得通过删除暂存数据来“修复”未知状态。
 - 既有 Core 账号不得删除或覆盖；回滚只能删除明确由本次 `migration_id` 创建的资源。
 - `COMMITTED` 不允许回滚；结果未知时保持阻断，尤其是 signout。
+- signout 与同一规范化 identifier 的迁移共享进程内串行锁；锁覆盖快照捕获至迁移完成与绑定路由，也覆盖 signout 的 pending 检查至上游调用结束。
+- authenticate 与 signout 使用独立限流桶，按直接连接来源 IP 计数；signout 超限返回 `429 TooManyRequestsException` 与 `Retry-After: 1`。
 - 已提交但缺权威结果、带资源漂移或权属不明时不建立永久绑定，也不自动回滚。
 - 永久绑定不随 token 摘要过期；token 保留期必须覆盖上游 token 的最长有效期。
 - 首版不得启动第二个 Scribe 实例共享同一 SQLite 文件或 Redis 迁移命名空间。
@@ -55,7 +57,7 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 
 `SCRIBE_PURE_PROXY=true` 时，根接口与全部 authserver 端点直接转发到旧上游，不执行 JSON 解析、竞速、迁移或绑定路由。该模式不连接 Redis、SQLite 或 Armorial，也不执行启动恢复；`/readyz` 仅表示进程可响应。
 
-正常迁移模式下，启动时先执行 Redis 暂存扫描与恢复，再开始监听 HTTP。若扫描失败，进程退出；恢复单条记录失败时记录 `migration recovery blocked`、计入 `result="blocked"` 指标并继续处理其他记录。未知状态、缺失既有 Core 用户、迁移新建 Core 用户仍存在、profile/资产身份不符或已提交记录缺权威结果时，不会自动回滚或建立绑定。
+正常迁移模式下，启动时先执行 Redis 暂存扫描与恢复，再开始监听 HTTP。若扫描失败，进程退出；恢复单条记录失败时记录 `migration recovery blocked`、计入 `result="blocked"` 指标并继续处理其他记录。committed 只有完整匹配 Core 权属与 ID、account、固定 profile、暂存资产摘要且无漂移时才重绑；`ROLLING_BACK`/`ROLLED_BACK` 每次启动都重新对账并验证回滚清单。未知状态、缺失既有 Core 用户、迁移新建 Core 用户仍存在、身份或资产不符、已提交记录缺权威结果时，不会自动回滚、删除暂存或建立绑定。
 
 ## 正常迁移观测
 
@@ -176,8 +178,9 @@ curl -fsS "$SCRIBE_PUBLIC_BASE_URL/metrics"
 4. 对阻断记录使用日志中的 `migration_id` 查询 Armorial 权威状态。
 5. 已提交记录完成绑定后进入 `LOCKED`；未提交记录完成回滚后删除暂存；未知记录保持阻断。
 6. 已提交但 reconcile 未返回权威结果，或返回资源漂移时，保持 `COMMITTED` 与用户阻断；不得猜测会话、手工写 binding 或调用 rollback。
-7. 自动回滚前还会核对既有 Core 用户存在、固定 profile 与暂存资产身份一致；核对失败时保留暂存并告警。
-8. 重复启动应幂等：`LOCKED` 不重复迁移，已删除的回滚暂存不再次处理，缺结果的已提交记录每次均保持阻断。
+7. committed 重绑前逐项核对 Core 权属与 ID、account、固定 profile 和暂存资产摘要；任何缺失、额外、重复或身份不符的资源都会阻断。
+8. 自动回滚前核对既有 Core 用户存在、固定 profile 与暂存资产身份一致；`ROLLING_BACK` 与 `ROLLED_BACK` 重启时再次执行权威对账，清单不符不得删除暂存。
+9. 重复启动应幂等：`LOCKED` 不重复迁移，已验证的回滚暂存删除后不再处理，缺结果或清单漂移的已提交记录每次均保持阻断。
 
 在受信任的运维主机上需要手动 reconcile 时，关闭 shell tracing，使用环境变量注入服务凭据：
 
@@ -209,6 +212,9 @@ curl -fsS -X POST \
 | Commit 响应丢失 | Armorial 提交后、Scribe 收到响应前切断连接 | 暂存进入 `RECONCILING`；重启后 reconcile，已提交只重新锁定 |
 | 部分回滚 | rollback 返回仍存在的迁移资源 | 不删除暂存、不宣称完成，恢复阻断指标触发告警 |
 | 重复启动 | 对 committed、rolled_back 与缺结果记录连续重启两次 | 不重复迁移；已回滚暂存消失；缺结果记录保持阻断且无 binding |
+| 恢复清单漂移 | reconcile 返回错误 account/profile/资产摘要，或 rolled_back 清单仍有残留 | 不建立 binding、不删除暂存，恢复操作计入 blocked |
+| signout 与迁移竞态 | 分别阻塞迁移快照/提交和 signout 上游调用 | 同 identifier 的后续操作等待前者完成，不越过 pending 门闸 |
+| signout 限流 | 对同一来源 IP 超过 `SCRIBE_AUTH_BURST` 连续调用 signout | 返回 `429 TooManyRequestsException`；authenticate 额度不受影响 |
 | 恢复阻塞监听 | 在启动恢复完成前观察监听端口 | 端口不可连接；恢复扫描完成后才开始监听，扫描失败则进程退出 |
 | SQLite 绑定失败 | commit 成功后令 SQLite 写入失败 | 认证返回 `503`，不手工写 binding；恢复后启动重绑 |
 | Token 过期 | 使用短 TTL 并等待映射过期 | 旧 token 不可路由，永久 binding 保留，重新认证路由不变 |

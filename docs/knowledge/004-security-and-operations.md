@@ -2,7 +2,8 @@
 
 ## 凭据
 
-- 明文密码只存在于 authenticate/commit 当前请求内存；目标 Core 仅保存正常凭据哈希。
+- 明文密码只存在于 authenticate/signout/commit 当前请求内存；目标 Core 仅保存正常凭据哈希。
+- signout 与同一规范化 identifier 的迁移共享进程内串行锁，覆盖快照捕获至迁移完成与绑定路由，以及 pending 检查至 signout 上游调用结束。
 - 禁止写入 Redis、数据库、访问日志、审计日志、错误上下文、trace、metrics label 与崩溃转储。
 - 禁止将 multipart 原始请求体或完整认证请求写入调试日志。
 - 错误报告只记录迁移 ID、阶段和稳定错误码。
@@ -11,7 +12,8 @@
 ## 网络与资源
 
 - 所有 Scribe 到上游流量使用 TLS，并校验主机名与证书。
-- 认证入口在昂贵工作之前限流。
+- authenticate 与 signout 在昂贵工作之前分别限流，使用独立 token bucket 和直接连接来源 IP；不信任 `X-Forwarded-For` 等请求头。
+- signout 超限返回标准 `429 TooManyRequestsException` 与 `Retry-After: 1`，不访问 pending 状态或上游。
 - 上传设置总请求大小、单文件大小、解压后像素数和并发上限。
 - 纹理下载禁止访问 loopback、link-local、私网、云元数据地址；每次重定向重新校验。
 - DNS rebinding 通过在连接时固定并校验解析结果防护。
@@ -39,6 +41,8 @@ Redis 是迁移暂存区，不是账号真相来源。建议：
 
 - 首版只在进程启动时扫描迁移并恢复可恢复状态，不运行周期性恢复 worker；恢复完成前不监听 HTTP。
 - 对账比较迁移日志、Core 用户、Yggdrasil profile 与资产记录。
+- committed 重绑前必须完整匹配 Core 权属与 ID、account、固定 profile、暂存资产摘要及资源存在性；缺失、额外、重复或身份不符均失败关闭。
+- `ROLLING_BACK` 与 `ROLLED_BACK` 每次启动都重新权威对账并验证回滚清单，不能仅凭 Redis 状态删除暂存。
 - 资源存在但权属不明、状态未知或身份与暂存包不一致时停止自动回滚并告警。
 - 已提交迁移只允许使用权威结果重新绑定并锁定，不允许回滚；缺结果或存在漂移时保持阻断。
 - 回滚必须可重试且只删除本次迁移明确创建的资源。
