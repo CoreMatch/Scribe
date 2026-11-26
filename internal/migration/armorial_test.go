@@ -187,6 +187,9 @@ func TestCommitRejectsInvalidResponses(t *testing.T) {
 		{name: "wrong profile", mutate: func(r *CommitResult) { r.ProfileID = strings.Repeat("a", 32) }},
 		{name: "missing token", mutate: func(r *CommitResult) { r.Session.AccessToken = "" }},
 		{name: "wrong selected profile", mutate: func(r *CommitResult) { r.Session.SelectedProfile.Name = "OtherPlayer" }},
+		{name: "missing user", mutate: func(r *CommitResult) { r.User = nil }},
+		{name: "wrong user", mutate: func(r *CommitResult) { r.User.ID = strings.Repeat("a", 32) }},
+		{name: "invalid user property", mutate: func(r *CommitResult) { r.User.Properties = []map[string]string{{"name": "role"}} }},
 		{name: "ambiguous core ownership", mutate: func(r *CommitResult) { r.CreatedCoreUser = false; r.ReusedCoreUser = false }},
 		{name: "wrong asset digest", mutate: func(r *CommitResult) { r.Assets.Skin.SHA256 = strings.Repeat("a", 64) }},
 		{name: "wrong absent asset", mutate: func(r *CommitResult) { r.Assets.Cape.Status = "absent" }},
@@ -377,6 +380,10 @@ func successfulCommitResult(staged StagedMigration, skinStatus, capeStatus strin
 			AccessToken:     "new-access-token",
 			ClientToken:     "new-client-token",
 			SelectedProfile: staged.Profile,
+		},
+		User: &protocol.User{
+			ID:         staged.Profile.ID,
+			Properties: []map[string]string{{"name": "role", "value": "member"}},
 		},
 		Assets: AssetResults{
 			Skin: skin,

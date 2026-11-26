@@ -71,6 +71,10 @@ func successfulMigration() migration.Result {
 				ClientToken:     "migrated-client",
 				SelectedProfile: protocol.Profile{ID: "12345678123412341234567812345678", Name: "LegacyPlayer"},
 			},
+			User: &protocol.User{
+				ID:         "12345678123412341234567812345678",
+				Properties: []map[string]string{{"name": "role", "value": "target-member"}},
+			},
 		},
 	}
 }
@@ -269,9 +273,17 @@ func TestAuthenticateMigratesLegacyUserBeforeBinding(t *testing.T) {
 	checker := &fakePendingChecker{pending: true}
 	env.gateway.migrationPending = checker
 
-	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player@Example.COM","password":"secret"}`)
+	response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player@Example.COM","password":"secret","requestUser":true}`)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "migrated-token") {
 		t.Fatalf("migration response = %d %s", response.Code, response.Body.String())
+	}
+	authenticated, err := protocol.DecodeAuthenticateResponse(response.Body.Bytes())
+	if err != nil || authenticated.User == nil || authenticated.User.ID != migrator.result.Commit.User.ID ||
+		authenticated.User.Properties[0]["value"] != "target-member" {
+		t.Fatalf("migration response user = %+v, error = %v", authenticated.User, err)
+	}
+	if strings.Contains(response.Body.String(), "legacy-user") || strings.Contains(response.Body.String(), "legacy-role") {
+		t.Fatalf("migration returned legacy user metadata: %s", response.Body.String())
 	}
 	if strings.Contains(response.Body.String(), "legacy-token") || strings.Contains(response.Body.String(), "armorial-token") {
 		t.Fatalf("migration leaked an upstream token: %s", response.Body.String())
@@ -295,6 +307,35 @@ func TestAuthenticateMigratesLegacyUserBeforeBinding(t *testing.T) {
 	}
 	if _, err := env.store.GetBindingByToken(context.Background(), "migrated-token"); err != nil {
 		t.Fatalf("migrated token binding missing: %v", err)
+	}
+}
+
+func TestMigratedAuthenticationOmitsUserUnlessRequested(t *testing.T) {
+	for _, body := range []string{
+		`{"username":"Player","password":"secret"}`,
+		`{"username":"Player","password":"secret","requestUser":false}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusOK, authenticationBody("legacy-token", "LegacyPlayer", true))
+			}))
+			defer legacy.Close()
+			armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				writeJSON(w, http.StatusForbidden, `{"error":"ForbiddenOperationException"}`)
+			}))
+			defer armorial.Close()
+			env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+			env.gateway.migrator = &fakeMigrator{result: successfulMigration()}
+
+			response := env.perform(http.MethodPost, "/authserver/authenticate", body)
+			if response.Code != http.StatusOK {
+				t.Fatalf("migration response = %d %s", response.Code, response.Body.String())
+			}
+			authenticated, err := protocol.DecodeAuthenticateResponse(response.Body.Bytes())
+			if err != nil || authenticated.User != nil {
+				t.Fatalf("unrequested migration user = %+v, error = %v", authenticated.User, err)
+			}
+		})
 	}
 }
 
@@ -332,6 +373,7 @@ func TestMigrationFailuresDoNotBindOrLeakTokens(t *testing.T) {
 		{name: "migration error", err: errors.New("commit failed")},
 		{name: "uncommitted result", result: migration.Result{MigrationID: "migration", Commit: migration.CommitResult{MigrationID: "migration", Status: "applying"}}},
 		{name: "incomplete session", result: migration.Result{MigrationID: "migration", Commit: migration.CommitResult{MigrationID: "migration", Status: "committed"}}},
+		{name: "missing authoritative user", result: migration.Result{MigrationID: "migration", Commit: migration.CommitResult{MigrationID: "migration", Status: "committed", Session: migration.Session{AccessToken: "token", ClientToken: "client", SelectedProfile: protocol.Profile{ID: "12345678123412341234567812345678", Name: "Player"}}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -345,7 +387,7 @@ func TestMigrationFailuresDoNotBindOrLeakTokens(t *testing.T) {
 			defer armorial.Close()
 			env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
 			env.gateway.migrator = &fakeMigrator{result: tt.result, err: tt.err}
-			response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret"}`)
+			response := env.perform(http.MethodPost, "/authserver/authenticate", `{"username":"Player","password":"secret","requestUser":true}`)
 			if response.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want 503", response.Code)
 			}

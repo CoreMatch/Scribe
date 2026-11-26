@@ -110,7 +110,7 @@ func (g *Gateway) migrate(w http.ResponseWriter, r *http.Request, request protoc
 		writeProtocolError(w, http.StatusServiceUnavailable, "ServiceUnavailableException", "Migration is temporarily unavailable.")
 		return
 	}
-	result, err := migratedAuthenticationResult(migrated)
+	result, err := migratedAuthenticationResult(migrated, request.RequestUser != nil && *request.RequestUser)
 	if err != nil {
 		g.log.Info("migration blocked", "outcome", decision.Outcome, "reason", "invalid_migration_result")
 		g.metrics.AuthenticationBlocked("invalid_migration_result")
@@ -138,7 +138,7 @@ func migrationUser(user *protocol.User) (string, map[string]string) {
 	return user.ID, properties
 }
 
-func migratedAuthenticationResult(migrated migration.Result) (race.Result, error) {
+func migratedAuthenticationResult(migrated migration.Result, requestUser bool) (race.Result, error) {
 	if migrated.MigrationID == "" || migrated.Commit.MigrationID != migrated.MigrationID || migrated.Commit.Status != "committed" {
 		return race.Result{}, errors.New("migration result is not committed")
 	}
@@ -148,6 +148,12 @@ func migratedAuthenticationResult(migrated migration.Result) (race.Result, error
 		ClientToken:       session.ClientToken,
 		SelectedProfile:   &session.SelectedProfile,
 		AvailableProfiles: session.AvailableProfiles,
+	}
+	if requestUser {
+		if migrated.Commit.User == nil {
+			return race.Result{}, errors.New("migration result is missing authoritative user")
+		}
+		response.User = migrated.Commit.User
 	}
 	body, err := json.Marshal(response)
 	if err != nil {

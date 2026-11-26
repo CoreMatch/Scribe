@@ -87,16 +87,17 @@ type CommitMetadata struct {
 }
 
 type CommitResult struct {
-	MigrationID     string       `json:"migration_id"`
-	Status          string       `json:"status"`
-	CoreUID         string       `json:"core_uid"`
-	AccountID       int64        `json:"account_id"`
-	ProfileID       string       `json:"profile_id"`
-	CreatedCoreUser bool         `json:"created_core_user"`
-	ReusedCoreUser  bool         `json:"reused_core_user"`
-	Session         Session      `json:"session"`
-	Assets          AssetResults `json:"assets"`
-	CommittedAt     time.Time    `json:"committed_at"`
+	MigrationID     string         `json:"migration_id"`
+	Status          string         `json:"status"`
+	CoreUID         string         `json:"core_uid"`
+	AccountID       int64          `json:"account_id"`
+	ProfileID       string         `json:"profile_id"`
+	CreatedCoreUser bool           `json:"created_core_user"`
+	ReusedCoreUser  bool           `json:"reused_core_user"`
+	Session         Session        `json:"session"`
+	User            *protocol.User `json:"user"`
+	Assets          AssetResults   `json:"assets"`
+	CommittedAt     time.Time      `json:"committed_at"`
 }
 
 type commitResultWire struct {
@@ -382,10 +383,27 @@ func validateCommitResult(result CommitResult, staged StagedMigration) error {
 		!strings.EqualFold(session.SelectedProfile.ID, staged.Profile.ID) || session.SelectedProfile.Name != staged.Profile.Name {
 		return ErrInvalidResponse
 	}
+	if err := validateMigrationUser(result.User, result.ProfileID); err != nil {
+		return ErrInvalidResponse
+	}
 	if err := validateAssetResult(result.Assets.Skin, staged.Skin); err != nil {
 		return err
 	}
 	return validateAssetResult(result.Assets.Cape, staged.Cape)
+}
+
+func validateMigrationUser(user *protocol.User, profileID string) error {
+	if user == nil || !protocol.ValidProfileID(user.ID) || !strings.EqualFold(user.ID, profileID) {
+		return ErrInvalidResponse
+	}
+	for _, property := range user.Properties {
+		name, hasName := property["name"]
+		_, hasValue := property["value"]
+		if len(property) != 2 || !hasName || !hasValue || name == "" {
+			return ErrInvalidResponse
+		}
+	}
+	return nil
 }
 
 func validateAssetResult(result AssetResult, asset *StagedAsset) error {

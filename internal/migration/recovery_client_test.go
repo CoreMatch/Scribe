@@ -130,6 +130,12 @@ func TestRecoveryOperationsRejectInvalidStatusResponses(t *testing.T) {
 			data["status"] = MigrationRolledBack
 			data["result"] = committedResult
 		}},
+		{name: "committed result without user", mutate: func(data map[string]any) {
+			data["status"] = MigrationCommitted
+			result := successfulCommitResult(staged, "uploaded", "uploaded")
+			result.User = nil
+			data["result"] = result
+		}},
 		{name: "invalid resource kind", mutate: func(data map[string]any) {
 			data["resources"] = []map[string]any{{"kind": "invalid", "resource_id": "resource", "ownership": "preexisting", "present": true}}
 		}},
@@ -220,7 +226,8 @@ func TestRecoveryStatusValidatesCommittedResultAndDropsErrorMessage(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Result == nil || status.Result.Session.AccessToken != "new-access-token" || status.LastError == nil || status.LastError.Code != "old_failure" {
+	if status.Result == nil || status.Result.Session.AccessToken != "new-access-token" || status.Result.User == nil ||
+		!strings.EqualFold(status.Result.User.ID, staged.Profile.ID) || status.LastError == nil || status.LastError.Code != "old_failure" {
 		t.Fatalf("status = %+v", status)
 	}
 	encoded, err := json.Marshal(status)

@@ -218,6 +218,9 @@ func validateRecoveredCommitResult(result CommitResult, migrationID string) erro
 			return ErrInvalidResponse
 		}
 	}
+	if err := validateMigrationUser(result.User, result.ProfileID); err != nil {
+		return ErrInvalidResponse
+	}
 	if err := validateRecoveredAssetResult(result.Assets.Skin); err != nil {
 		return err
 	}
