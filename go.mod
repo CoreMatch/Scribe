@@ -1,6 +1,6 @@
 module github.com/corematch/scribe
 
-go 1.26.4
+go 1.26.11
 
 require (
 	github.com/alicebob/miniredis/v2 v2.41.0
