@@ -1,6 +1,6 @@
 # Scribe Roadmap
 
-状态：Scribe 侧 M1–M5 核心流程已实现；M0 契约收尾与 M6/M7 运行化仍在推进。本文档定义实施顺序与验收标准。
+状态：Scribe 侧 M1–M6 核心流程已实现；M0 契约冻结已完成，M7 灰度上线与外部环境验收仍在推进。本文档定义实施顺序与验收标准。
 
 ## 当前实施决策
 
@@ -28,6 +28,8 @@
 - business API drift 通过。
 - 错误码全部先注册后使用。
 - ADR、知识库与契约无冲突。
+
+完成记录（2026-11-26）：HA-Contract `66b165a` 注册迁移端点、错误码与权威 `user` 契约；OpenAPI validity、business API drift/self-test、field drift 和 consumer URL 检查全部通过。计划路由的 drift exemption 将在对应实现落地时同批移除。
 
 ## M1：Scribe 基础网关与永久绑定
 
