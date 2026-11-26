@@ -2,7 +2,9 @@ package migration
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -98,10 +100,13 @@ func (r *Recovery) recoverCommitted(ctx context.Context, record StagedMigration)
 	if err != nil {
 		return err
 	}
+	if err := validateRecoveryStatusIdentity(status, record.MigrationID); err != nil {
+		return err
+	}
 	if status.Status != MigrationCommitted {
 		return ErrInvalidResponse
 	}
-	return r.completeCommitted(ctx, record, status.Result)
+	return r.completeCommitted(ctx, record, status.Result, status.LastError)
 }
 
 func (r *Recovery) recoverActive(ctx context.Context, record StagedMigration) error {
@@ -109,29 +114,89 @@ func (r *Recovery) recoverActive(ctx context.Context, record StagedMigration) er
 	if err != nil {
 		return err
 	}
+	if err := validateRecoveryStatusIdentity(status, record.MigrationID); err != nil {
+		return err
+	}
 	switch status.Status {
 	case MigrationCommitted:
-		return r.completeCommitted(ctx, record, status.Result)
+		return r.completeCommitted(ctx, record, status.Result, status.LastError)
 	case MigrationRolledBack:
 		return r.finishRollback(ctx, record, status)
 	}
+	if err := validateRollbackOwnership(status, record); err != nil {
+		return err
+	}
 	rolledBack, err := r.client.Rollback(ctx, record.MigrationID)
 	if err != nil {
+		return err
+	}
+	if err := validateRecoveryStatusIdentity(rolledBack, record.MigrationID); err != nil {
 		return err
 	}
 	switch rolledBack.Status {
 	case MigrationRolledBack:
 		return r.finishRollback(ctx, record, rolledBack)
 	case MigrationCommitted:
-		return r.completeCommitted(ctx, record, rolledBack.Result)
+		return r.completeCommitted(ctx, record, rolledBack.Result, rolledBack.LastError)
 	default:
 		return ErrInvalidResponse
 	}
 }
 
-func (r *Recovery) completeCommitted(ctx context.Context, record StagedMigration, result *CommitResult) error {
-	if result == nil {
-		return nil
+func validateRecoveryStatusIdentity(status MigrationStatus, migrationID string) error {
+	if !strings.EqualFold(status.MigrationID, migrationID) {
+		return ErrInvalidResponse
+	}
+	return nil
+}
+
+func validateRollbackOwnership(status MigrationStatus, record StagedMigration) error {
+	switch status.Status {
+	case MigrationReceived, MigrationStagedInRedis, MigrationApplying, MigrationFailed:
+	case MigrationUnknown:
+		return ErrMigrationBlocked
+	default:
+		return ErrInvalidResponse
+	}
+	for _, resource := range status.Resources {
+		switch resource.Kind {
+		case "core_user":
+			if resource.Ownership == "created_by_migration" {
+				if resource.Present {
+					return ErrRollbackNotAllowed
+				}
+				return ErrInvalidResponse
+			}
+			if !resource.Present {
+				return ErrInvalidResponse
+			}
+		case "game_account":
+			if resource.Ownership != "created_by_migration" {
+				return ErrInvalidResponse
+			}
+		case "profile":
+			if resource.Ownership != "created_by_migration" || !strings.EqualFold(resource.ResourceID, record.Profile.ID) {
+				return ErrInvalidResponse
+			}
+		case "skin", "cape":
+			asset := record.Skin
+			if resource.Kind == "cape" {
+				asset = record.Cape
+			}
+			if resource.Ownership != "preexisting" || asset == nil ||
+				!strings.EqualFold(resource.ResourceID, fmt.Sprintf("%x", sha256.Sum256(asset.PNG))) {
+				return ErrInvalidResponse
+			}
+		default:
+			return ErrInvalidResponse
+		}
+	}
+	return nil
+}
+
+func (r *Recovery) completeCommitted(ctx context.Context, record StagedMigration, result *CommitResult, lastError *MigrationError) error {
+	if result == nil || lastError != nil {
+		return ErrMigrationBlocked
 	}
 	if err := validateRecoveredCommitResult(*result, record.MigrationID); err != nil {
 		return err

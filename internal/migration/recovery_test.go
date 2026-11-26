@@ -3,7 +3,9 @@ package migration
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -146,11 +148,103 @@ func TestRecoveryLeavesCommittedMigrationWithoutSessionForRetry(t *testing.T) {
 	client := &fakeRecoveryClient{reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: MigrationCommitted}}
 	bindings := &fakeRecoveryBindings{}
 	recovery := newTestRecovery(staging, client, bindings)
-	if err := recovery.recover(context.Background(), record); err != nil {
-		t.Fatal(err)
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrMigrationBlocked) {
+		t.Fatalf("recover() error = %v, want ErrMigrationBlocked", err)
 	}
 	if len(staging.transitions) != 0 || len(bindings.bindCalls) != 0 || len(bindings.tokens) != 0 {
 		t.Fatal("recovery fabricated a session or changed committed state")
+	}
+}
+
+func TestRecoveryRejectsCommittedResultWithDrift(t *testing.T) {
+	record := recoveryRecord(t, StateCommitted)
+	status := committedRecoveryStatus(t, record)
+	status.LastError = &MigrationError{Code: "migration_reconcile_failed", Stage: "reconcile"}
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: status}
+	bindings := &fakeRecoveryBindings{}
+	recovery := newTestRecovery(staging, client, bindings)
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrMigrationBlocked) {
+		t.Fatalf("recover() error = %v, want ErrMigrationBlocked", err)
+	}
+	if len(staging.transitions) != 0 || len(bindings.bindCalls) != 0 || len(bindings.tokens) != 0 {
+		t.Fatal("drifted committed result was bound or locked")
+	}
+}
+
+func TestRecoveryRollbackRequiresClearOwnership(t *testing.T) {
+	record := recoveryRecord(t, StateReconciling)
+	skinHash := fmt.Sprintf("%x", sha256.Sum256(record.Skin.PNG))
+	capeHash := fmt.Sprintf("%x", sha256.Sum256(record.Cape.PNG))
+	tests := []struct {
+		name      string
+		status    string
+		resources []MigrationResource
+		want      error
+	}{
+		{name: "empty partial inventory", status: MigrationFailed},
+		{name: "owned partial resources", status: MigrationFailed, resources: []MigrationResource{
+			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "preexisting", Present: true},
+			{Kind: "game_account", ResourceID: "42", Ownership: "created_by_migration", Present: true},
+			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: true},
+			{Kind: "skin", ResourceID: skinHash, Ownership: "preexisting", Present: true},
+			{Kind: "cape", ResourceID: capeHash, Ownership: "preexisting", Present: false},
+		}},
+		{name: "unexpected asset", status: MigrationFailed, resources: []MigrationResource{
+			{Kind: "skin", ResourceID: strings.Repeat("a", 64), Ownership: "preexisting", Present: true},
+		}, want: ErrInvalidResponse},
+		{name: "unknown outcome", status: MigrationUnknown, want: ErrMigrationBlocked},
+		{name: "missing preexisting core", status: MigrationFailed, resources: []MigrationResource{
+			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "preexisting", Present: false},
+		}, want: ErrInvalidResponse},
+		{name: "created core remains", status: MigrationFailed, resources: []MigrationResource{
+			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "created_by_migration", Present: true},
+		}, want: ErrRollbackNotAllowed},
+		{name: "created core missing", status: MigrationFailed, resources: []MigrationResource{
+			{Kind: "core_user", ResourceID: "core-uuid", Ownership: "created_by_migration", Present: false},
+		}, want: ErrInvalidResponse},
+		{name: "unexpected profile", status: MigrationFailed, resources: []MigrationResource{
+			{Kind: "profile", ResourceID: strings.Repeat("a", 32), Ownership: "created_by_migration", Present: true},
+		}, want: ErrInvalidResponse},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+			client := &fakeRecoveryClient{
+				reconcileStatus: MigrationStatus{MigrationID: record.MigrationID, Status: tt.status, Resources: tt.resources},
+				rollbackStatus:  MigrationStatus{MigrationID: record.MigrationID, Status: MigrationRolledBack},
+			}
+			recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+			err := recovery.recover(context.Background(), record)
+			if tt.want == nil {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(client.calls, []string{"reconcile", "rollback"}) {
+					t.Fatalf("recovery calls = %#v", client.calls)
+				}
+				return
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("recover() error = %v, want %v", err, tt.want)
+			}
+			if !reflect.DeepEqual(client.calls, []string{"reconcile"}) || len(staging.transitions) != 0 {
+				t.Fatalf("unsafe rollback proceeded: calls = %#v, transitions = %#v", client.calls, staging.transitions)
+			}
+		})
+	}
+}
+
+func TestRecoveryRejectsMismatchedStatusIdentity(t *testing.T) {
+	record := recoveryRecord(t, StateReconciling)
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: MigrationStatus{MigrationID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", Status: MigrationFailed}}
+	recovery := newTestRecovery(staging, client, &fakeRecoveryBindings{})
+	if err := recovery.recover(context.Background(), record); !errors.Is(err, ErrInvalidResponse) {
+		t.Fatalf("recover() error = %v, want ErrInvalidResponse", err)
+	}
+	if len(client.calls) != 1 || len(staging.transitions) != 0 {
+		t.Fatalf("calls = %#v, transitions = %#v", client.calls, staging.transitions)
 	}
 }
 
