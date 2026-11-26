@@ -47,12 +47,16 @@ type Store interface {
 }
 
 type SQLiteStore struct {
-	db *sql.DB
+	db              *sql.DB
+	tokenBindingTTL time.Duration
 }
 
-func OpenSQLite(path string) (*SQLiteStore, error) {
+func OpenSQLite(path string, tokenBindingTTL time.Duration) (*SQLiteStore, error) {
 	if path == "" {
 		return nil, errors.New("sqlite path must not be empty")
+	}
+	if tokenBindingTTL < time.Second {
+		return nil, errors.New("token binding TTL must be at least one second")
 	}
 	if path != ":memory:" {
 		absolute, err := filepath.Abs(path)
@@ -83,10 +87,14 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
-	store := &SQLiteStore{db: db}
+	store := &SQLiteStore{db: db, tokenBindingTTL: tokenBindingTTL}
 	if err := store.initSchema(); err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	if _, err := store.PruneTokenBindings(context.Background()); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("prune token bindings: %w", err)
 	}
 	return store, nil
 }
@@ -114,6 +122,7 @@ CREATE TABLE IF NOT EXISTS token_bindings (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS token_bindings_identifier_idx ON token_bindings(identifier_hash);
+CREATE INDEX IF NOT EXISTS token_bindings_created_idx ON token_bindings(created_at);
 `)
 	if err != nil {
 		return fmt.Errorf("initialize binding schema: %w", err)
@@ -187,11 +196,12 @@ func (s *SQLiteStore) GetBindingByToken(ctx context.Context, accessToken string)
 	if err != nil {
 		return Binding{}, err
 	}
+	cutoff := time.Now().UTC().Add(-s.tokenBindingTTL).Unix()
 	row := s.db.QueryRowContext(ctx, `
 SELECT b.identifier_hash, b.winner, b.migration_id, b.created_at
 FROM token_bindings t
 JOIN bindings b ON b.identifier_hash = t.identifier_hash
-WHERE t.token_hash = ? AND t.winner = b.winner`, hash)
+WHERE t.token_hash = ? AND t.winner = b.winner AND t.created_at > ?`, hash, cutoff)
 	binding, err := scanBinding(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Binding{}, ErrNotFound
@@ -297,6 +307,15 @@ func digest(value string) (string, error) {
 
 func validWinner(winner Winner) bool {
 	return winner == Legacy || winner == Armorial
+}
+
+func (s *SQLiteStore) PruneTokenBindings(ctx context.Context) (int64, error) {
+	cutoff := time.Now().UTC().Add(-s.tokenBindingTTL).Unix()
+	result, err := s.db.ExecContext(ctx, `DELETE FROM token_bindings WHERE created_at <= ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *SQLiteStore) Ping(ctx context.Context) error {

@@ -45,7 +45,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return errors.New("migration Redis is unavailable")
 	}
-	store, err := binding.OpenSQLite(cfg.SQLitePath)
+	store, err := binding.OpenSQLite(cfg.SQLitePath, cfg.TokenBindingTTL)
 	if err != nil {
 		return err
 	}

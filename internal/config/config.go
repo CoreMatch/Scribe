@@ -24,6 +24,7 @@ type Config struct {
 	MigrationTimeout           time.Duration
 	WriteTimeout               time.Duration
 	SQLitePath                 string
+	TokenBindingTTL            time.Duration
 	RequestTimeout             time.Duration
 	ShutdownTimeout            time.Duration
 	MaxRequestBody             int64
@@ -48,6 +49,7 @@ func Load() (Config, error) {
 		MigrationTimeout:           60 * time.Second,
 		WriteTimeout:               150 * time.Second,
 		SQLitePath:                 env("SCRIBE_SQLITE_PATH", "data/scribe.db"),
+		TokenBindingTTL:            15 * 24 * time.Hour,
 		RequestTimeout:             15 * time.Second,
 		ShutdownTimeout:            15 * time.Second,
 		MaxRequestBody:             1 << 20,
@@ -60,6 +62,9 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	if cfg.TokenBindingTTL, err = durationEnv("SCRIBE_TOKEN_BINDING_TTL", cfg.TokenBindingTTL); err != nil {
+		return Config{}, err
+	}
 	if cfg.RequestTimeout, err = durationEnv("SCRIBE_UPSTREAM_TIMEOUT", cfg.RequestTimeout); err != nil {
 		return Config{}, err
 	}
@@ -111,6 +116,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.SQLitePath) == "" {
 		return errors.New("SCRIBE_SQLITE_PATH must not be empty")
+	}
+	if c.TokenBindingTTL < time.Second {
+		return errors.New("SCRIBE_TOKEN_BINDING_TTL must be at least one second")
 	}
 	for _, item := range []struct {
 		name string

@@ -769,7 +769,7 @@ func TestGatewayRequiresPendingCheckerWithMigrator(t *testing.T) {
 
 func newTestGateway(t *testing.T, armorialURL, legacyURL string, intent race.Intent) *testGateway {
 	t.Helper()
-	store, err := binding.OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"))
+	store, err := binding.OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"), 15*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

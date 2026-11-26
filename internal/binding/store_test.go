@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestSQLiteBindingIsPermanentAndIdempotent(t *testing.T) {
@@ -126,6 +127,93 @@ func TestSQLiteTokenBindingByHash(t *testing.T) {
 	}
 }
 
+func TestSQLiteExpiredTokenBindingIsNotRoutableAndCanBePruned(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scribe.db")
+	store, err := OpenSQLite(path, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err := store.BindIfAbsent(ctx, "Player", Armorial, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BindToken(ctx, "expired-token", "Player", Armorial); err != nil {
+		t.Fatal(err)
+	}
+	tokenSum := sha256.Sum256([]byte("expired-token"))
+	expiredAt := time.Now().UTC().Add(-2 * time.Hour).Unix()
+	if _, err := store.db.ExecContext(ctx, `UPDATE token_bindings SET created_at = ? WHERE token_hash = ?`, expiredAt, hex.EncodeToString(tokenSum[:])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetBindingByToken(ctx, "expired-token"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired token error = %v, want ErrNotFound", err)
+	}
+	removed, err := store.PruneTokenBindings(ctx)
+	if err != nil || removed != 1 {
+		t.Fatalf("PruneTokenBindings() = %d, %v, want 1, nil", removed, err)
+	}
+	removed, err = store.PruneTokenBindings(ctx)
+	if err != nil || removed != 0 {
+		t.Fatalf("second PruneTokenBindings() = %d, %v, want 0, nil", removed, err)
+	}
+	if _, err := store.GetBinding(ctx, "Player"); err != nil {
+		t.Fatalf("token pruning removed permanent binding: %v", err)
+	}
+}
+
+func TestSQLitePrunesExpiredTokenBindingsOnOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scribe.db")
+	store, err := OpenSQLite(path, 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := store.BindIfAbsent(ctx, "Player", Armorial, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"old-token", "fresh-token"} {
+		if err := store.BindToken(ctx, token, "Player", Armorial); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldSum := sha256.Sum256([]byte("old-token"))
+	if _, err := store.db.ExecContext(ctx, `UPDATE token_bindings SET created_at = ? WHERE token_hash = ?`, time.Now().UTC().Add(-2*time.Hour).Unix(), hex.EncodeToString(oldSum[:])); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenSQLite(path, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if _, err := reopened.GetBindingByToken(ctx, "old-token"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old token error = %v, want ErrNotFound", err)
+	}
+	if _, err := reopened.GetBindingByToken(ctx, "fresh-token"); err != nil {
+		t.Fatalf("fresh token was pruned: %v", err)
+	}
+	var count int
+	if err := reopened.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM token_bindings`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("token binding count = %d, want 1", count)
+	}
+}
+
+func TestOpenSQLiteRejectsInvalidTokenBindingTTL(t *testing.T) {
+	for _, ttl := range []time.Duration{0, 500 * time.Millisecond, -time.Second} {
+		if store, err := OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"), ttl); err == nil {
+			_ = store.Close()
+			t.Fatalf("OpenSQLite() accepted TTL %s", ttl)
+		}
+	}
+}
+
 func TestSQLiteBindingByHashSupportsCredentialFreeRecovery(t *testing.T) {
 	store := openTestStore(t)
 	ctx := context.Background()
@@ -166,7 +254,7 @@ func TestSQLiteRejectsInvalidIdentifierHashes(t *testing.T) {
 
 func TestSQLiteStoresOnlyIdentifierAndTokenDigests(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "scribe.db")
-	store, err := OpenSQLite(path)
+	store, err := OpenSQLite(path, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +283,7 @@ func TestSQLiteStoresOnlyIdentifierAndTokenDigests(t *testing.T) {
 
 func TestSQLiteBindingSurvivesReopen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "scribe.db")
-	store, err := OpenSQLite(path)
+	store, err := OpenSQLite(path, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +294,7 @@ func TestSQLiteBindingSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := OpenSQLite(path)
+	reopened, err := OpenSQLite(path, 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +327,7 @@ func TestSQLiteMissingBinding(t *testing.T) {
 
 func openTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
-	store, err := OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"))
+	store, err := OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"), 24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -28,6 +28,7 @@ func TestLoadReadsOverrides(t *testing.T) {
 	t.Setenv("SCRIBE_SHUTDOWN_TIMEOUT", "2s")
 	t.Setenv("SCRIBE_MAX_REQUEST_BODY", "4096")
 	t.Setenv("SCRIBE_SQLITE_PATH", "/tmp/scribe-test.db")
+	t.Setenv("SCRIBE_TOKEN_BINDING_TTL", "48h")
 	t.Setenv("SCRIBE_AUTH_RATE_LIMIT", "2.5")
 	t.Setenv("SCRIBE_AUTH_BURST", "7")
 	t.Setenv("SCRIBE_RATE_LIMIT_MAX_ENTRIES", "100")
@@ -48,7 +49,7 @@ func TestLoadReadsOverrides(t *testing.T) {
 	if cfg.RequestTimeout != 3*time.Second || cfg.ShutdownTimeout != 2*time.Second || cfg.MaxRequestBody != 4096 {
 		t.Fatalf("Load() overrides not applied: %+v", cfg)
 	}
-	if cfg.SQLitePath != "/tmp/scribe-test.db" || cfg.AuthRateLimit != 2.5 || cfg.AuthBurst != 7 || cfg.RateLimiterMaxEntries != 100 {
+	if cfg.SQLitePath != "/tmp/scribe-test.db" || cfg.TokenBindingTTL != 48*time.Hour || cfg.AuthRateLimit != 2.5 || cfg.AuthBurst != 7 || cfg.RateLimiterMaxEntries != 100 {
 		t.Fatalf("Load() storage/rate overrides not applied: %+v", cfg)
 	}
 	if cfg.CircuitFailureThreshold != 3 || cfg.CircuitOpenTimeout != 4*time.Second || cfg.CircuitHalfOpenMaxRequests != 2 {
@@ -72,6 +73,21 @@ func TestLoadRejectsInvalidNumericOverrides(t *testing.T) {
 			t.Setenv("SCRIBE_AUTH_RATE_LIMIT", value)
 			if _, err := Load(); err == nil {
 				t.Fatalf("Load() accepted invalid rate %q", value)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidTokenBindingTTL(t *testing.T) {
+	setMigrationEnvironment(t)
+	t.Setenv("SCRIBE_PUBLIC_BASE_URL", "https://auth.example.com")
+	t.Setenv("SCRIBE_LEGACY_BASE_URL", "https://legacy.internal")
+	t.Setenv("SCRIBE_ARMIORIAL_BASE_URL", "https://armorial.internal")
+	for _, value := range []string{"0", "-1s", "500ms", "not-a-duration"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("SCRIBE_TOKEN_BINDING_TTL", value)
+			if _, err := Load(); err == nil || !strings.Contains(err.Error(), "SCRIBE_TOKEN_BINDING_TTL") {
+				t.Fatalf("Load() error = %v, want token binding TTL error", err)
 			}
 		})
 	}

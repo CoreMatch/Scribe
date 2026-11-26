@@ -46,7 +46,7 @@ func TestCheckReadyRequiresRedisAndSQLite(t *testing.T) {
 	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
 	defer redisClient.Close()
 	databasePath := filepath.Join(t.TempDir(), "scribe.db")
-	store, err := binding.OpenSQLite(databasePath)
+	store, err := binding.OpenSQLite(databasePath, 15*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestCheckReadyRequiresRedisAndSQLite(t *testing.T) {
 	if err := checkReady(ctx, redisClient, store); err == nil || !strings.Contains(err.Error(), "binding store") {
 		t.Fatalf("checkReady() with closed SQLite = %v", err)
 	}
-	store, err = binding.OpenSQLite(databasePath)
+	store, err = binding.OpenSQLite(databasePath, 15*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestNewMigratorConstructsProductionDependenciesAndRecovery(t *testing.T) {
 	redisServer := miniredis.RunT(t)
 	redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
 	defer redisClient.Close()
-	store, err := binding.OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"))
+	store, err := binding.OpenSQLite(filepath.Join(t.TempDir(), "scribe.db"), 15*24*time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
