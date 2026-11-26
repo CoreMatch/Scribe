@@ -13,7 +13,7 @@
 
 - 所有 Scribe 到上游流量使用 TLS，并校验主机名与证书。
 - authenticate 与 signout 在昂贵工作之前分别限流，使用独立 token bucket 和直接连接来源 IP；不信任 `X-Forwarded-For` 等请求头。
-- signout 超限返回标准 `429 TooManyRequestsException` 与 `Retry-After: 1`，不访问 pending 状态或上游。
+- signout 超限返回标准 `429 TooManyRequestsException`，不访问 pending 状态或上游；`Retry-After` 按补齐一个 token 所需时间向上取整到秒，避免低速率配置下过早重试。
 - 上传设置总请求大小、单文件大小、解压后像素数和并发上限。
 - 纹理下载禁止访问 loopback、link-local、私网、云元数据地址；每次重定向重新校验。
 - DNS rebinding 通过在连接时固定并校验解析结果防护。

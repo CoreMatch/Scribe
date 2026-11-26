@@ -4,6 +4,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -83,12 +84,24 @@ func (l *RateLimiter) cleanup(now time.Time) {
 func RateLimit(limiter *RateLimiter, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !limiter.Allow(ClientIP(r)) {
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", strconv.FormatInt(retryAfterSeconds(limiter.rate), 10))
 			protocol.WriteError(w, http.StatusTooManyRequests, "TooManyRequestsException", "Too many requests. Try again later.")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func retryAfterSeconds(rate float64) int64 {
+	const maxRetryAfterSeconds = int64(1<<31 - 1)
+	seconds := math.Ceil(1 / rate)
+	if math.IsInf(seconds, 0) || seconds > float64(maxRetryAfterSeconds) {
+		return maxRetryAfterSeconds
+	}
+	if seconds < 1 {
+		return 1
+	}
+	return int64(seconds)
 }
 
 func RateLimitAuthentication(limiter, signoutLimiter *RateLimiter, next http.Handler) http.Handler {

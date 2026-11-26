@@ -110,6 +110,26 @@ func TestRateLimitAuthenticationDedicatesSignoutBucket(t *testing.T) {
 	}
 }
 
+func TestRateLimitRetryAfterCoversTokenRefill(t *testing.T) {
+	limiter := NewRateLimiter(0.2, 1, 10)
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := RateLimit(limiter, next)
+	request := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/authserver/signout", nil)
+		req.RemoteAddr = "192.0.2.10:1234"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	if response := request(); response.Code != http.StatusNoContent {
+		t.Fatalf("first status = %d, want 204", response.Code)
+	}
+	response := request()
+	if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "5" {
+		t.Fatalf("limited status = %d, retry-after = %q, want 429 and 5", response.Code, response.Header().Get("Retry-After"))
+	}
+}
+
 func TestRateLimitMiddlewareUsesRemoteAddrOnly(t *testing.T) {
 	limiter := NewRateLimiter(1, 1, 10)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
