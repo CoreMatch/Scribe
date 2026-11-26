@@ -91,14 +91,18 @@ func RateLimit(limiter *RateLimiter, next http.Handler) http.Handler {
 	})
 }
 
-func RateLimitAuthentication(limiter *RateLimiter, next http.Handler) http.Handler {
+func RateLimitAuthentication(limiter, signoutLimiter *RateLimiter, next http.Handler) http.Handler {
 	limited := RateLimit(limiter, next)
+	limitedSignout := RateLimit(signoutLimiter, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/authserver/authenticate" {
+		switch r.URL.Path {
+		case "/authserver/authenticate":
 			limited.ServeHTTP(w, r)
-			return
+		case "/authserver/signout":
+			limitedSignout.ServeHTTP(w, r)
+		default:
+			next.ServeHTTP(w, r)
 		}
-		next.ServeHTTP(w, r)
 	})
 }
 

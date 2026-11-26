@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -59,7 +60,7 @@ func TestRateLimiterIsConcurrencySafe(t *testing.T) {
 func TestRateLimitAuthenticationOnlyLimitsAuthenticate(t *testing.T) {
 	limiter := NewRateLimiter(1, 1, 10)
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	handler := RateLimitAuthentication(limiter, next)
+	handler := RateLimitAuthentication(limiter, NewRateLimiter(1, 1, 10), next)
 	tests := []struct {
 		path string
 		want int
@@ -76,6 +77,35 @@ func TestRateLimitAuthenticationOnlyLimitsAuthenticate(t *testing.T) {
 		handler.ServeHTTP(response, request)
 		if response.Code != tt.want {
 			t.Fatalf("%s status = %d, want %d", tt.path, response.Code, tt.want)
+		}
+	}
+}
+
+func TestRateLimitAuthenticationDedicatesSignoutBucket(t *testing.T) {
+	limiter := NewRateLimiter(1, 1, 10)
+	signoutLimiter := NewRateLimiter(1, 1, 10)
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := RateLimitAuthentication(limiter, signoutLimiter, next)
+	request := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.RemoteAddr = "192.0.2.10:1234"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+
+	for _, path := range []string{"/authserver/authenticate", "/authserver/signout"} {
+		if response := request(path); response.Code != http.StatusNoContent {
+			t.Fatalf("first %s status = %d, want 204", path, response.Code)
+		}
+	}
+	for _, path := range []string{"/authserver/authenticate", "/authserver/signout"} {
+		response := request(path)
+		if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "1" {
+			t.Fatalf("second %s status = %d, retry-after = %q", path, response.Code, response.Header().Get("Retry-After"))
+		}
+		if !strings.Contains(response.Body.String(), "TooManyRequestsException") {
+			t.Fatalf("second %s error = %s", path, response.Body.String())
 		}
 	}
 }
