@@ -151,6 +151,9 @@ func (g *Gateway) Handler() http.Handler {
 	rootProxy := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.armorialProxy.ServeHTTP(w, r)
 	})
+	profile := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.armorialProxy.ServeHTTP(w, r)
+	})
 	authenticate := http.HandlerFunc(g.authenticate)
 	refresh := http.HandlerFunc(g.refresh)
 	validate := http.HandlerFunc(g.validate)
@@ -159,6 +162,7 @@ func (g *Gateway) Handler() http.Handler {
 	if g.pureProxy {
 		legacy := http.HandlerFunc(g.legacyProxy.ServeHTTP)
 		rootProxy = legacy
+		profile = legacy
 		authenticate = legacy
 		refresh = legacy
 		validate = legacy
@@ -166,6 +170,7 @@ func (g *Gateway) Handler() http.Handler {
 		signout = legacy
 	}
 	mux.Handle("GET /{$}", rootProxy)
+	mux.Handle("GET /sessionserver/session/minecraft/profile/{profileID}", profile)
 	mux.Handle("POST /authserver/authenticate", authenticate)
 	mux.Handle("POST /authserver/refresh", refresh)
 	mux.Handle("POST /authserver/validate", validate)

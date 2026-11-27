@@ -875,6 +875,44 @@ func TestRootMetadataComesFromArmorialAndRewritesAPILocation(t *testing.T) {
 	}
 }
 
+func TestProfileComesFromArmorialAndPreservesSignedQuery(t *testing.T) {
+	var legacyCalls atomic.Int32
+	legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		legacyCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer legacy.Close()
+	const profileID = "12345678123412341234567812345678"
+	armorial := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("unsigned") != "false" {
+			t.Errorf("profile query = %s", r.URL.RequestURI())
+		}
+		switch r.URL.Path {
+		case "/sessionserver/session/minecraft/profile/" + profileID:
+			writeJSON(w, http.StatusOK, `{"id":"`+profileID+`","name":"Player","properties":[]}`)
+		case "/sessionserver/session/minecraft/profile/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			t.Errorf("unexpected profile path = %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer armorial.Close()
+	env := newTestGateway(t, armorial.URL, legacy.URL, race.IntentUnspecified)
+
+	response := env.perform(http.MethodGet, "/sessionserver/session/minecraft/profile/"+profileID+"?unsigned=false", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), profileID) {
+		t.Fatalf("profile = %d %s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("X-Authlib-Injector-API-Location") != "https://auth.example.com" {
+		t.Fatalf("profile API location = %q", response.Header().Get("X-Authlib-Injector-API-Location"))
+	}
+	response = env.perform(http.MethodGet, "/sessionserver/session/minecraft/profile/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?unsigned=false", "")
+	if response.Code != http.StatusNoContent || legacyCalls.Load() != 0 {
+		t.Fatalf("missing profile = %d, legacy calls = %d", response.Code, legacyCalls.Load())
+	}
+}
+
 func TestGatewayRejectsInvalidRequestsAndInternalRoutes(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -976,6 +1014,7 @@ func TestPureProxyForwardsEveryPublicRouteToLegacyWithoutMigration(t *testing.T)
 		body   string
 	}{
 		{method: http.MethodGet, path: "/"},
+		{method: http.MethodGet, path: "/sessionserver/session/minecraft/profile/12345678123412341234567812345678?unsigned=false"},
 		{method: http.MethodPost, path: "/authserver/authenticate", body: `not-json`},
 		{method: http.MethodPost, path: "/authserver/refresh", body: `{"accessToken":"legacy-token"}`},
 		{method: http.MethodPost, path: "/authserver/validate", body: `{"accessToken":"legacy-token"}`},
@@ -996,13 +1035,13 @@ func TestPureProxyForwardsEveryPublicRouteToLegacyWithoutMigration(t *testing.T)
 			t.Fatalf("public API location was not rewritten: %#v", response.Header())
 		}
 	}
-	if legacyCalls.Load() != 6 || armorialCalls.Load() != 0 {
+	if legacyCalls.Load() != 7 || armorialCalls.Load() != 0 {
 		t.Fatalf("upstream calls = legacy %d, armorial %d", legacyCalls.Load(), armorialCalls.Load())
 	}
 
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/internal/migrations/commit", nil))
-	if response.Code != http.StatusNotFound || legacyCalls.Load() != 6 {
+	if response.Code != http.StatusNotFound || legacyCalls.Load() != 7 {
 		t.Fatalf("internal route = %d, legacy calls = %d", response.Code, legacyCalls.Load())
 	}
 }

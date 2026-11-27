@@ -145,7 +145,7 @@ func committedRecoveryStatus(t *testing.T, record StagedMigration) MigrationStat
 		Status:      MigrationCommitted,
 		Result:      &result,
 		Resources: []MigrationResource{
-			{Kind: "core_user", ResourceID: result.CoreUID, Ownership: coreOwnership, Present: true},
+			{Kind: "core_user", ResourceID: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Ownership: coreOwnership, Present: true},
 			{Kind: "game_account", ResourceID: fmt.Sprintf("%d", result.AccountID), Ownership: "created_by_migration", Present: true},
 			{Kind: "profile", ResourceID: record.Profile.ID, Ownership: "created_by_migration", Present: true},
 			{Kind: "skin", ResourceID: stagedAssetHash(record.Skin), Ownership: "preexisting", Present: true},
@@ -226,6 +226,27 @@ func TestRecoveryBindsAuthoritativeCommitAfterLostResponse(t *testing.T) {
 	}
 	if !reflect.DeepEqual(client.calls, []string{"reconcile"}) {
 		t.Fatalf("recovery calls = %#v", client.calls)
+	}
+}
+
+func TestRecoveryLocksCommittedMigrationWithCoreUUIDResource(t *testing.T) {
+	record := recoveryRecord(t, StateCommitted)
+	status := committedRecoveryStatus(t, record)
+	if status.Result.CoreUID == status.Resources[0].ResourceID {
+		t.Fatal("test must distinguish Core UID from Core UUID")
+	}
+	staging := &fakeRecoveryStaging{records: []StagedMigration{record}}
+	client := &fakeRecoveryClient{reconcileStatus: status}
+	bindings := &fakeRecoveryBindings{}
+	recovery := newTestRecovery(staging, client, bindings)
+	if err := recovery.recover(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if staging.records[0].State != StateLocked || !reflect.DeepEqual(staging.transitions, []State{StateLocked}) {
+		t.Fatalf("committed recovery did not lock: state=%s transitions=%#v", staging.records[0].State, staging.transitions)
+	}
+	if len(bindings.bindCalls) != 1 || len(bindings.tokens) != 1 {
+		t.Fatalf("permanent bindings were not completed: bindings=%#v tokens=%d", bindings.bindCalls, len(bindings.tokens))
 	}
 }
 

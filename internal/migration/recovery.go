@@ -12,6 +12,7 @@ import (
 
 	"github.com/corematch/scribe/internal/binding"
 	"github.com/corematch/scribe/internal/metrics"
+	"github.com/corematch/scribe/internal/protocol"
 )
 
 type RecoveryClient interface {
@@ -278,7 +279,7 @@ func validateCommittedInventory(status MigrationStatus, record StagedMigration, 
 		}
 		switch kind {
 		case "core_user":
-			if resource.ResourceID == "" || !strings.EqualFold(resource.ResourceID, result.CoreUID) {
+			if resource.ResourceID == "" || !protocol.ValidProfileID(resource.ResourceID) {
 				return ErrInvalidResponse
 			}
 		case "game_account":
